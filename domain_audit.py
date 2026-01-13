@@ -12,39 +12,37 @@ from datetime import datetime
 from OpenSSL import crypto
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (GeoIP增強版)", layout="wide")
+st.set_page_config(page_title="域名檢測 (萬能修復版)", layout="wide")
 
-# --- 核心：智慧提取與防沾黏 ---
+# --- 核心：萬能智慧分詞 ---
 
 def parse_input_raw(raw_text):
     """
     智慧分詞：
-    1. 強力修復黏在一起的域名 (如 .twwww)
-    2. 保留無效格式
+    1. 萬能修復：針對任何 TLD (.com, .tw, .hk, .vn...) 後面黏著 www/http 的情況
+    2. 保留無效格式以便核對
     """
-    # 找 (.tw|.com|.net|.org|.biz|.cn) 後面直接接 (www|http) 的情況
-    processed_text = re.sub(r'(\.tw|\.com|\.net|\.org|\.biz|\.cn)(www|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
+    # 步驟 1: 萬能防沾黏切割
+    # 邏輯：只要看到 "點+2~5個字母" (如 .com, .tw, .hk) 後面緊接著 "www." 或 "http"，就強制切一刀
+    processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     
-    # 再次處理常見的 http 黏連
+    # 步驟 2: 處理常見的 http 黏連
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
-    
-    # 處理 "未找到"
     processed_text = processed_text.replace('未找到', '\n未找到\n')
 
-    # 分詞
+    # 步驟 3: 分詞與清洗
     tokens = re.split(r'[\s,;]+', processed_text)
-    
     final_domains = []
     
     for token in tokens:
         token = token.strip()
         if not token: continue 
         
-        # 清洗
+        # 移除協定頭與路徑
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
         
-        # 移除前後雜訊
+        # 移除前後雜訊 (保留中文與點)
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         
         if clean:
@@ -52,12 +50,12 @@ def parse_input_raw(raw_text):
     
     return final_domains
 
-# --- 檢測函式 (GeoIP 增強版) ---
+# --- 檢測函式 (抗封鎖增強版) ---
 
 def get_dns_geoip(domain):
     result = {"CNAME": "-", "IP": "-", "Country": "-", "City": "-", "ISP": "-"}
     
-    # 1. DNS 查詢 (速度快，不用太擔心被擋)
+    # 1. DNS 查詢
     try:
         cname_answers = dns.resolver.resolve(domain, 'CNAME')
         result["CNAME"] = str(cname_answers[0].target).rstrip('.')
@@ -73,46 +71,51 @@ def get_dns_geoip(domain):
             ip_list = list(set([ai[4][0] for ai in ais]))
         except: pass 
 
-    # 2. GeoIP 查詢 (重點修改：加入重試機制)
+    # 2. GeoIP 查詢 (重點：嚴格限速與重試)
     if ip_list:
         result["IP"] = ", ".join(ip_list)
         first_ip = ip_list[0]
         
-        # 最多重試 3 次
-        for attempt in range(3):
+        # 如果 IP 看起來不完整 (例如 118.163.203.)，就不查 GeoIP 以免報錯
+        if first_ip.endswith('.'):
+             result["IP"] = f"{first_ip} (Incomplete)"
+             return result
+
+        # 重試機制 (指數退避)
+        for attempt in range(4): # 增加到 4 次重試
             try:
-                # 隨機延遲 0.5 ~ 1.5 秒 (稍微放慢速度)
-                time.sleep(random.uniform(0.5, 1.5))
+                # 隨機延遲：這對於 1000 筆資料非常重要，避免瞬間觸發 45 req/min 限制
+                # 第一次快一點，失敗後會越來越慢
+                sleep_time = random.uniform(1.0, 2.0) + (attempt * 2)
+                time.sleep(sleep_time)
                 
-                # 隨機 UA
-                user_agents = [
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
-                    'Mozilla/5.0 (X11; Linux x86_64)'
+                # 隨機 UA 偽裝
+                uas = [
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
                 ]
-                headers = {'User-Agent': random.choice(user_agents)}
+                headers = {'User-Agent': random.choice(uas)}
                 
-                # 發送請求
                 resp = requests.get(
                     f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", 
                     headers=headers, 
                     timeout=5
                 )
                 
-                # 如果遇到 429 (Too Many Requests)，休息久一點再試
                 if resp.status_code == 429:
-                    wait_time = 2 * (attempt + 1) # 2s, 4s, 6s...
-                    time.sleep(wait_time)
+                    # 遇到 429 Too Many Requests，直接進入下一次迴圈 (會睡更久)
                     continue
 
-                geo_data = resp.json()
-                if geo_data.get("status") == "success":
-                    result["Country"] = geo_data.get("country", "-")
-                    result["City"] = geo_data.get("city", "-")
-                    result["ISP"] = geo_data.get("isp", "-")
-                    break # 成功就跳出迴圈
+                if resp.status_code == 200:
+                    geo_data = resp.json()
+                    if geo_data.get("status") == "success":
+                        result["Country"] = geo_data.get("country", "-")
+                        result["City"] = geo_data.get("city", "-")
+                        result["ISP"] = geo_data.get("isp", "-")
+                        break # 成功取得資料，跳出
             except:
-                time.sleep(1) # 發生連線錯誤，休息 1 秒再試
+                time.sleep(1)
     else:
         result["IP"] = "No Record"
         
@@ -147,13 +150,18 @@ def get_ssl_info(domain):
     return result
 
 def run_globalping(domain):
+    # Global Ping 也很容易被擋，這裡也加強防護
     url = "https://api.globalping.io/v1/measurements"
     headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/json'}
     payload = {"limit": 2, "locations": [], "target": domain, "type": "http", "measurementOptions": {"protocol": "HTTPS"}}
+    
     for attempt in range(3):
         try:
-            time.sleep(random.uniform(2.0, 4.0))
+            # 增加延遲
+            time.sleep(random.uniform(2.0, 4.0) + attempt)
+            
             resp = requests.post(url, json=payload, headers=headers, timeout=10)
+            
             if resp.status_code == 202:
                 ms_id = resp.json()['id']
                 for _ in range(10):
@@ -167,7 +175,7 @@ def run_globalping(domain):
                             return f"{success_count}/{len(results)} OK"
                 return "Timeout"
             elif resp.status_code == 429:
-                time.sleep(5 * (attempt + 1)) 
+                time.sleep(5) 
                 continue
             elif resp.status_code == 400: return "Invalid Domain"
             else:
@@ -188,6 +196,7 @@ def process_single_domain(args):
 
     if '.' not in domain or len(domain) < 3:
         result_dict["IPs"] = "❌ Format Error"
+        # 標記格式錯誤，這可能是因為切割不完美導致的殘留
         return (index, result_dict)
 
     try:
@@ -209,19 +218,20 @@ def process_single_domain(args):
 
 # --- UI 介面 ---
 
-st.title("🌐 域名檢測 (有問題請找Andy Huang)")
-st.caption("Auto-fix enabled: 已啟用自動修復黏連資料 (如 .twwww) + GeoIP 強力重試")
+st.title("🌐 域名檢測 (巨量資料專用版)")
+st.caption("✅ 支援自動修復黏連 (.hk, .vn, .com...) ✅ 強力抗 API 封鎖 ✅ 資料完整性優先")
 
 with st.sidebar:
     st.header("⚙️ 掃描設定")
     check_dns = st.checkbox("DNS & GeoIP", value=True)
     check_ssl = st.checkbox("SSL & TLS 1.3", value=True)
-    check_ping = st.checkbox("Global Ping", value=True)
+    check_ping = st.checkbox("Global Ping", value=True, help="如果只想查 IP 和 SSL，建議取消此項以大幅加快速度")
     
-    # 🔥 重要建議：大量資料掃描時，請將滑桿調低
-    workers = st.slider("併發執行緒 (1000筆以上建議設為 2)", 1, 5, 2)
+    st.warning("⚠️ 掃描 1000+ 筆資料時：")
+    st.caption("為確保 Country/ISP 資料完整，請勿將速度調太快。")
+    workers = st.slider("掃描速度 (建議維持在 2)", 1, 5, 2)
 
-raw_input = st.text_area("請直接貼上你的資料 (不管多亂)", height=250)
+raw_input = st.text_area("請貼上 1063 筆資料", height=250)
 
 if st.button("🚀 開始掃描", type="primary"):
     domain_list = parse_input_raw(raw_input)
@@ -231,15 +241,14 @@ if st.button("🚀 開始掃描", type="primary"):
     if not domain_list:
         st.warning("輸入為空")
     else:
-        st.info(f"✅ 成功辨識出 {len(domain_list)} 筆資料")
+        st.success(f"已識別 {len(domain_list)} 筆資料 (之前的版本可能只抓到 1002 筆)")
         
-        # 修正變數定義順序，避免 NameError
         task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
-        
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
+        # 使用 ThreadPoolExecutor
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args}
             
@@ -251,7 +260,7 @@ if st.button("🚀 開始掃描", type="primary"):
                 progress_bar.progress(completed_count / len(domain_list))
                 status_text.text(f"掃描中... ({completed_count}/{len(domain_list)})")
 
-        st.success("完成！")
+        st.success("掃描完成！")
         results.sort(key=lambda x: x[0])
         final_data = [x[1] for x in results]
         df = pd.DataFrame(final_data)
@@ -269,4 +278,4 @@ if st.button("🚀 開始掃描", type="primary"):
 
         st.dataframe(df.style.apply(style_dataframe, axis=1), use_container_width=True, hide_index=True)
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載報告 CSV", csv, "dns_audit_fixed.csv", "text/csv")
+        st.download_button("📥 下載報告 CSV", csv, "dns_audit_ultimate.csv", "text/csv")
