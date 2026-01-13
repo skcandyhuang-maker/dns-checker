@@ -12,30 +12,41 @@ from datetime import datetime
 from OpenSSL import crypto
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (客製化勾選版)", layout="wide")
+st.set_page_config(page_title="域名檢測 (不去重/不遺漏版)", layout="wide")
 
-# --- 輔助函式 ---
+# --- 核心：智慧提取 (不去重、不遺漏) ---
 
-def extract_valid_domains(raw_text):
-    """智慧提取 FQDN 域名"""
+def parse_input_raw(raw_text):
+    """
+    智慧分詞，但保留重複項與無效格式。
+    """
+    # 1. 處理黏在一起的網址 (強制切分)
     processed_text = raw_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
+    
+    # 2. 使用分隔符號切分 (換行, 空白, 逗號, 分號)
     tokens = re.split(r'[\s,;]+', processed_text)
-    valid_domains = []
+    
+    final_domains = []
     
     for token in tokens:
         token = token.strip()
-        if not token: continue
+        if not token: continue # 只有完全空白的才跳過
+        
+        # 3. 清洗協定頭與路徑 (盡量救回域名)
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
         
-        if '.' in clean and len(clean) > 3:
-            clean = re.sub(r'[^a-zA-Z0-9.-]', '', clean)
-            if clean:
-                valid_domains.append(clean)
+        # 4. 移除前後雜訊
+        clean = re.sub(r'^[^a-zA-Z0-9]+|[^a-zA-Z0-9]+$', '', clean)
+        
+        if clean:
+            # 關鍵修改：不做去重 (set)，也不做嚴格過濾 (if '.' in clean)
+            # 直接加入列表，留給後續檢測去判斷
+            final_domains.append(clean)
     
-    return list(dict.fromkeys(valid_domains))
+    return final_domains
 
-# --- 核心檢測函式 ---
+# --- 檢測函式 ---
 
 def get_dns_geoip(domain):
     """取得 DNS 與 GeoIP"""
@@ -163,7 +174,6 @@ def run_globalping(domain):
                             success_count = sum(1 for r in results if r['result']['status'] == 'finished' and str(r['result']['rawOutput']).startswith('HTTP'))
                             return f"{success_count}/{len(results)} OK"
                 return "Timeout"
-            
             elif resp.status_code == 429:
                 wait_time = 5 * (attempt + 1)
                 time.sleep(wait_time) 
@@ -178,21 +188,24 @@ def run_globalping(domain):
     return "Too Busy"
 
 def process_single_domain(args):
-    # 這裡接收第三個參數：checks_config
     index, domain, config = args
-    domain = domain.strip()
-    if not domain: return None
     
+    # 初始化結果字典
     result_dict = {
         "Domain": domain,
-        # 預設值
         "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-",
         "Global Ping": "-"
     }
 
+    # 1. 檢查域名格式 (若無效，直接標記但不跳過)
+    # 簡單判斷：是否有點，長度是否合理
+    if '.' not in domain or len(domain) < 3:
+        result_dict["IPs"] = "❌ Format Error"
+        # 即使格式錯誤，也回傳這行，讓報表顯示
+        return (index, result_dict)
+
     try:
-        # 1. 根據勾選執行 DNS & GeoIP
         if config['dns']:
             dns_data = get_dns_geoip(domain)
             result_dict.update({
@@ -203,7 +216,6 @@ def process_single_domain(args):
                 "ISP": dns_data["ISP"]
             })
 
-        # 2. 根據勾選執行 SSL
         if config['ssl']:
             ssl_data = get_ssl_info(domain)
             result_dict.update({
@@ -213,13 +225,9 @@ def process_single_domain(args):
                 "SSL Days": ssl_data["SSL_Days_Left"]
             })
 
-        # 3. 根據勾選執行 Global Ping
         if config['ping']:
-            # 如果有勾選，才跑這個最花時間的
             gp_result = run_globalping(domain)
             result_dict["Global Ping"] = gp_result
-        else:
-            result_dict["Global Ping"] = "-" # 沒勾選就直接顯示 -
 
         return (index, result_dict)
         
@@ -238,42 +246,34 @@ st.title("🌐 域名檢測 (有問題請找Andy Huang)")
 
 with st.sidebar:
     st.header("⚙️ 掃描設定")
-    
-    st.subheader("1. 選擇檢測項目")
-    # 這裡加入勾選框
-    check_dns = st.checkbox("DNS 解析 & GeoIP (國家/ISP)", value=True)
-    check_ssl = st.checkbox("SSL 憑證 & TLS 1.3 檢測", value=True)
-    check_ping = st.checkbox("Global Ping (全球連線測試)", value=True, help="此項目最耗時，若不需測試國外連線建議取消")
+    st.subheader("1. 檢測項目")
+    check_dns = st.checkbox("DNS 解析 & GeoIP", value=True)
+    check_ssl = st.checkbox("SSL & TLS 1.3", value=True)
+    check_ping = st.checkbox("Global Ping", value=True)
     
     st.divider()
-    
-    st.subheader("2. 效能設定")
-    workers = st.slider("併發執行緒", min_value=1, max_value=5, value=2, help="數字越大越快，但容易被API封鎖")
+    st.subheader("2. 效能")
+    workers = st.slider("併發執行緒", 1, 5, 2)
 
 with st.expander("ℹ️ 說明", expanded=True):
-    st.write("勾選左側側邊欄的項目即可開始檢測。取消勾選「Global Ping」可大幅提升掃描速度。")
+    st.write("支援重複域名與無效格式顯示。輸入幾行，輸出就是幾行。")
 
-raw_input = st.text_area("請輸入域名 (支援混亂格式)", height=200)
+raw_input = st.text_area("請輸入域名 (不去重)", height=200)
 
 if st.button("🚀 開始掃描", type="primary"):
-    clean_domains = extract_valid_domains(raw_input)
-    indexed_domains = list(enumerate(clean_domains))
+    # 使用新版分詞函式 (不去重)
+    domain_list = parse_input_raw(raw_input)
+    # 保存原始順序
+    indexed_domains = list(enumerate(domain_list))
     
-    # 建立設定檔字典
-    current_config = {
-        'dns': check_dns,
-        'ssl': check_ssl,
-        'ping': check_ping
-    }
+    current_config = {'dns': check_dns, 'ssl': check_ssl, 'ping': check_ping}
     
-    if not clean_domains:
-        st.warning("未偵測到有效域名。")
+    if not domain_list:
+        st.warning("輸入為空")
     else:
-        # 準備要傳入的參數，把 config 包進去
-        # 變成 [(0, 'google.com', config), (1, 'yahoo.com', config)...]
         task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
         
-        st.toast(f"開始掃描 {len(clean_domains)} 個域名...")
+        st.toast(f"開始掃描 {len(domain_list)} 筆資料...")
         
         results = []
         progress_bar = st.progress(0)
@@ -289,10 +289,10 @@ if st.button("🚀 開始掃描", type="primary"):
                     results.append(data)
                 
                 completed_count += 1
-                progress_bar.progress(completed_count / len(clean_domains))
-                status_text.text(f"掃描中... ({completed_count}/{len(clean_domains)})")
+                progress_bar.progress(completed_count / len(domain_list))
+                status_text.text(f"掃描中... ({completed_count}/{len(domain_list)})")
 
-        st.success("掃描完成！")
+        st.success("完成！")
         
         results.sort(key=lambda x: x[0])
         final_data = [x[1] for x in results]
@@ -300,7 +300,6 @@ if st.button("🚀 開始掃描", type="primary"):
         
         def style_dataframe(row):
             styles = [''] * len(row)
-            # 只有當該欄位有值(不是-)的時候才套用顏色，避免誤判
             if isinstance(row['SSL Days'], int):
                 if row['SSL Days'] < 30: styles[9] = 'background-color: #ffcccc'
                 elif row['SSL Days'] < 90: styles[9] = 'background-color: #ffffcc'
@@ -310,6 +309,11 @@ if st.button("🚀 開始掃描", type="primary"):
                 
             if ("Busy" in str(row['Global Ping']) or "Err" in str(row['Global Ping'])) and row['Global Ping'] != "-":
                  styles[10] = 'color: red;'
+            
+            # 標記格式錯誤的行
+            if "Format Error" in str(row['IPs']):
+                return ['background-color: #eeeeee; color: #888888'] * len(row)
+                
             return styles
 
         st.dataframe(
@@ -322,4 +326,4 @@ if st.button("🚀 開始掃描", type="primary"):
         )
         
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載報告 CSV", csv, "dns_audit_custom.csv", "text/csv")
+        st.download_button("📥 下載報告 CSV", csv, "dns_audit_raw.csv", "text/csv")
