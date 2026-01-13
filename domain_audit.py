@@ -12,50 +12,94 @@ from datetime import datetime
 from OpenSSL import crypto
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (萬能修復版)", layout="wide")
+st.set_page_config(page_title="域名檢測 (Multi-IP版)", layout="wide")
+
+# --- 輔助：雙欄位判別邏輯 ---
+
+def detect_providers(cname_record, isp_name):
+    cname = cname_record.lower()
+    isp = isp_name.lower()
+    cdn_found = "-"
+    cloud_found = "-"
+    
+    # 1. CDN 特徵庫
+    cdn_sigs = {
+        "Cloudflare": ["cloudflare", "cdn.cloudflare.net"],
+        "AWS CloudFront": ["cloudfront.net"],
+        "Akamai": ["akamai", "edgekey", "akamaiedge", "acadn"],
+        "Azure CDN": ["azureedge", "msecnd"],
+        "Fastly": ["fastly"],
+        "Imperva": ["incapdns", "imperva"],
+        "Edgio (EdgeCast)": ["edgecast", "systemcdn", "transactcdn"],
+        "CDNetworks": ["cdnetworks", "panthercdn"],
+        "Wangsu (網宿)": ["wswebpic", "wscdns", "chinanetcenter"],
+        "Tencent CDN": ["cdntip"],
+        "Alibaba CDN": ["kunlun", "alikunlun"],
+        "Gcore": ["gcore"],
+        "BunnyCDN": ["bunnycdn"],
+    }
+    
+    for provider, keywords in cdn_sigs.items():
+        for kw in keywords:
+            if kw in cname:
+                cdn_found = f"⚡ {provider}"
+                break
+        if cdn_found != "-": break
+        
+    if cdn_found == "-":
+        if "cloudflare" in isp: cdn_found = "⚡ Cloudflare"
+        elif "akamai" in isp: cdn_found = "⚡ Akamai"
+        elif "fastly" in isp: cdn_found = "⚡ Fastly"
+        elif "imperva" in isp: cdn_found = "⚡ Imperva"
+        elif "edgecast" in isp or "edgio" in isp: cdn_found = "⚡ Edgio"
+
+    # 2. Cloud/Hosting 特徵庫
+    if cdn_found == "-":
+        cloud_sigs = {
+            "AWS": ["amazon", "amazonaws"],
+            "Google Cloud": ["google", "googleusercontent"],
+            "Microsoft Azure": ["microsoft", "azure"],
+            "Alibaba Cloud": ["alibaba", "aliyun"],
+            "Tencent Cloud": ["tencent"],
+            "DigitalOcean": ["digitalocean"],
+            "Linode": ["linode"],
+            "Oracle Cloud": ["oracle"],
+            "Hetzner": ["hetzner"],
+            "OVH": ["ovh"],
+        }
+        for provider, keywords in cloud_sigs.items():
+            for kw in keywords:
+                if kw in cname or kw in isp:
+                    cloud_found = f"☁️ {provider}"
+                    break
+            if cloud_found != "-": break
+
+    return cdn_found, cloud_found
 
 # --- 核心：萬能智慧分詞 ---
 
 def parse_input_raw(raw_text):
-    """
-    智慧分詞：
-    1. 萬能修復：針對任何 TLD (.com, .tw, .hk, .vn...) 後面黏著 www/http 的情況
-    2. 保留無效格式以便核對
-    """
-    # 步驟 1: 萬能防沾黏切割
-    # 邏輯：只要看到 "點+2~5個字母" (如 .com, .tw, .hk) 後面緊接著 "www." 或 "http"，就強制切一刀
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
-    
-    # 步驟 2: 處理常見的 http 黏連
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     processed_text = processed_text.replace('未找到', '\n未找到\n')
 
-    # 步驟 3: 分詞與清洗
     tokens = re.split(r'[\s,;]+', processed_text)
     final_domains = []
     
     for token in tokens:
         token = token.strip()
         if not token: continue 
-        
-        # 移除協定頭與路徑
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
-        
-        # 移除前後雜訊 (保留中文與點)
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
-        
-        if clean:
-            final_domains.append(clean)
+        if clean: final_domains.append(clean)
     
     return final_domains
 
-# --- 檢測函式 (抗封鎖增強版) ---
+# --- 檢測函式 ---
 
 def get_dns_geoip(domain):
     result = {"CNAME": "-", "IP": "-", "Country": "-", "City": "-", "ISP": "-"}
-    
-    # 1. DNS 查詢
     try:
         cname_answers = dns.resolver.resolve(domain, 'CNAME')
         result["CNAME"] = str(cname_answers[0].target).rstrip('.')
@@ -71,29 +115,22 @@ def get_dns_geoip(domain):
             ip_list = list(set([ai[4][0] for ai in ais]))
         except: pass 
 
-    # 2. GeoIP 查詢 (重點：嚴格限速與重試)
     if ip_list:
         result["IP"] = ", ".join(ip_list)
         first_ip = ip_list[0]
         
-        # 如果 IP 看起來不完整 (例如 118.163.203.)，就不查 GeoIP 以免報錯
         if first_ip.endswith('.'):
              result["IP"] = f"{first_ip} (Incomplete)"
              return result
 
-        # 重試機制 (指數退避)
-        for attempt in range(4): # 增加到 4 次重試
+        for attempt in range(4):
             try:
-                # 隨機延遲：這對於 1000 筆資料非常重要，避免瞬間觸發 45 req/min 限制
-                # 第一次快一點，失敗後會越來越慢
-                sleep_time = random.uniform(1.0, 2.0) + (attempt * 2)
+                sleep_time = random.uniform(1.0, 2.0) + (attempt * 1.5)
                 time.sleep(sleep_time)
                 
-                # 隨機 UA 偽裝
                 uas = [
                     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
                 ]
                 headers = {'User-Agent': random.choice(uas)}
                 
@@ -102,20 +139,15 @@ def get_dns_geoip(domain):
                     headers=headers, 
                     timeout=5
                 )
-                
-                if resp.status_code == 429:
-                    # 遇到 429 Too Many Requests，直接進入下一次迴圈 (會睡更久)
-                    continue
-
+                if resp.status_code == 429: continue
                 if resp.status_code == 200:
                     geo_data = resp.json()
                     if geo_data.get("status") == "success":
                         result["Country"] = geo_data.get("country", "-")
                         result["City"] = geo_data.get("city", "-")
                         result["ISP"] = geo_data.get("isp", "-")
-                        break # 成功取得資料，跳出
-            except:
-                time.sleep(1)
+                        break
+            except: time.sleep(1)
     else:
         result["IP"] = "No Record"
         
@@ -150,18 +182,14 @@ def get_ssl_info(domain):
     return result
 
 def run_globalping(domain):
-    # Global Ping 也很容易被擋，這裡也加強防護
     url = "https://api.globalping.io/v1/measurements"
     headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/json'}
     payload = {"limit": 2, "locations": [], "target": domain, "type": "http", "measurementOptions": {"protocol": "HTTPS"}}
     
     for attempt in range(3):
         try:
-            # 增加延遲
             time.sleep(random.uniform(2.0, 4.0) + attempt)
-            
             resp = requests.post(url, json=payload, headers=headers, timeout=10)
-            
             if resp.status_code == 202:
                 ms_id = resp.json()['id']
                 for _ in range(10):
@@ -186,7 +214,11 @@ def run_globalping(domain):
 def process_single_domain(args):
     index, domain, config = args
     result_dict = {
-        "Domain": domain, "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
+        "Domain": domain, 
+        "CDN Provider": "-", 
+        "Cloud/Hosting": "-",
+        "Multi-IP": "-",     # 新增欄位：Multi-IP
+        "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", "Global Ping": "-"
     }
     
@@ -196,42 +228,60 @@ def process_single_domain(args):
 
     if '.' not in domain or len(domain) < 3:
         result_dict["IPs"] = "❌ Format Error"
-        # 標記格式錯誤，這可能是因為切割不完美導致的殘留
         return (index, result_dict)
 
     try:
         if config['dns']:
             dns_data = get_dns_geoip(domain)
-            result_dict.update({"CNAME": dns_data["CNAME"], "IPs": dns_data["IP"], "Country": dns_data["Country"], "City": dns_data["City"], "ISP": dns_data["ISP"]})
+            cdn, cloud = detect_providers(dns_data["CNAME"], dns_data["ISP"])
+            
+            # --- Multi-IP 判斷邏輯 ---
+            ip_str = dns_data["IP"]
+            multi_ip_status = "-"
+            if "," in ip_str and "Record" not in ip_str and "Incomplete" not in ip_str:
+                count = len(ip_str.split(','))
+                multi_ip_status = f"✅ Yes ({count})"
+            # -----------------------
+
+            result_dict.update({
+                "CDN Provider": cdn,
+                "Cloud/Hosting": cloud,
+                "Multi-IP": multi_ip_status, # 更新 Multi-IP
+                "CNAME": dns_data["CNAME"],
+                "IPs": dns_data["IP"],
+                "Country": dns_data["Country"],
+                "City": dns_data["City"],
+                "ISP": dns_data["ISP"]
+            })
+        
         if config['ssl']:
             ssl_data = get_ssl_info(domain)
             result_dict.update({"TLS 1.3": ssl_data["TLS_1.3_Status"], "Protocol": ssl_data["Actual_Protocol"], "Issuer": ssl_data["SSL_Issuer"], "SSL Days": ssl_data["SSL_Days_Left"]})
+        
         if config['ping']:
             gp_result = run_globalping(domain)
             result_dict["Global Ping"] = gp_result
+            
         return (index, result_dict)
     except Exception as e:
         return (index, {
-            "Domain": domain, "CNAME": "Error", "IPs": str(e),
+            "Domain": domain, "CDN Provider": "Error", "Cloud/Hosting": "Error", "Multi-IP": "-", "CNAME": "Error", "IPs": str(e),
             "Country": "-", "City": "-", "ISP": "-", "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", "Global Ping": "-"
         })
 
 # --- UI 介面 ---
 
-st.title("🌐 域名檢測 (巨量資料專用版)")
-st.caption("✅ 支援自動修復黏連 (.hk, .vn, .com...) ✅ 強力抗 API 封鎖 ✅ 資料完整性優先")
+st.title("🌐 域名檢測 (Multi-IP 版)")
+st.caption("✅ CDN/雲端判別 ✅ Multi-IP 偵測 ✅ 自動修復黏連 ✅ 抗 API 封鎖")
 
 with st.sidebar:
     st.header("⚙️ 掃描設定")
-    check_dns = st.checkbox("DNS & GeoIP", value=True)
+    check_dns = st.checkbox("DNS & GeoIP & Provider", value=True)
     check_ssl = st.checkbox("SSL & TLS 1.3", value=True)
-    check_ping = st.checkbox("Global Ping", value=True, help="如果只想查 IP 和 SSL，建議取消此項以大幅加快速度")
-    
-    st.warning("⚠️ 掃描 1000+ 筆資料時：")
-    st.caption("為確保 Country/ISP 資料完整，請勿將速度調太快。")
+    check_ping = st.checkbox("Global Ping", value=True)
     workers = st.slider("掃描速度 (建議維持在 2)", 1, 5, 2)
 
-raw_input = st.text_area("請貼上 1063 筆資料", height=250)
+raw_input = st.text_area("請貼上資料", height=250)
 
 if st.button("🚀 開始掃描", type="primary"):
     domain_list = parse_input_raw(raw_input)
@@ -241,14 +291,13 @@ if st.button("🚀 開始掃描", type="primary"):
     if not domain_list:
         st.warning("輸入為空")
     else:
-        st.success(f"已識別 {len(domain_list)} 筆資料 (之前的版本可能只抓到 1002 筆)")
+        st.success(f"已識別 {len(domain_list)} 筆資料")
         
         task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 使用 ThreadPoolExecutor
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args}
             
@@ -267,15 +316,44 @@ if st.button("🚀 開始掃描", type="primary"):
         
         def style_dataframe(row):
             styles = [''] * len(row)
+            
+            # CDN Provider (綠色粗體)
+            if "⚡" in str(row['CDN Provider']):
+                styles[1] = 'color: #009900; font-weight: bold;'
+            
+            # Cloud/Hosting (藍色)
+            if "☁️" in str(row['Cloud/Hosting']):
+                styles[2] = 'color: #0000FF;'
+
+            # Multi-IP (綠色粗體) - Index 3
+            if "Yes" in str(row['Multi-IP']):
+                styles[3] = 'color: #009900; font-weight: bold;'
+
+            # SSL Days (紅色/黃色背景)
             if isinstance(row['SSL Days'], int):
-                if row['SSL Days'] < 30: styles[9] = 'background-color: #ffcccc'
-                elif row['SSL Days'] < 90: styles[9] = 'background-color: #ffffcc'
+                ssl_idx = df.columns.get_loc("SSL Days")
+                if row['SSL Days'] < 30: styles[ssl_idx] = 'background-color: #ffcccc'
+                elif row['SSL Days'] < 90: styles[ssl_idx] = 'background-color: #ffffcc'
+
             if "No" in str(row['TLS 1.3']) and row['TLS 1.3'] != "-":
-                styles[6] = 'color: red; font-weight: bold;'
+                 tls_idx = df.columns.get_loc("TLS 1.3")
+                 styles[tls_idx] = 'color: red; font-weight: bold;'
+                 
             if "Format Error" in str(row['IPs']) or "Not Found" in str(row['IPs']):
                 return ['background-color: #eeeeee; color: #888888'] * len(row)
+                
             return styles
 
-        st.dataframe(df.style.apply(style_dataframe, axis=1), use_container_width=True, hide_index=True)
+        st.dataframe(
+            df.style.apply(style_dataframe, axis=1), 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "CDN Provider": st.column_config.TextColumn("CDN Provider", width="small"),
+                "Cloud/Hosting": st.column_config.TextColumn("Cloud/Hosting", width="small"),
+                "Multi-IP": st.column_config.TextColumn("Multi-IP", width="small"),
+                "IPs": st.column_config.TextColumn("IP Addresses", width="medium"),
+            }
+        )
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載報告 CSV", csv, "dns_audit_ultimate.csv", "text/csv")
+        st.download_button("📥 下載報告 CSV", csv, "dns_audit_multiip.csv", "text/csv")
