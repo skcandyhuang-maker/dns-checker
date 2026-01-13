@@ -12,7 +12,7 @@ from datetime import datetime
 from OpenSSL import crypto
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (防沾黏最終修復版)", layout="wide")
+st.set_page_config(page_title="域名檢測 (GeoIP增強版)", layout="wide")
 
 # --- 核心：智慧提取與防沾黏 ---
 
@@ -20,32 +20,31 @@ def parse_input_raw(raw_text):
     """
     智慧分詞：
     1. 強力修復黏在一起的域名 (如 .twwww)
-    2. 保留無效格式 (如 '未找到') 以便核對數量
+    2. 保留無效格式
     """
-    # --- 步驟 1: 手術刀切分黏連 ---
     # 找 (.tw|.com|.net|.org|.biz|.cn) 後面直接接 (www|http) 的情況
     processed_text = re.sub(r'(\.tw|\.com|\.net|\.org|\.biz|\.cn)(www|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     
     # 再次處理常見的 http 黏連
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     
-    # 處理 "未找到" 這種中文黏在一起的情況
+    # 處理 "未找到"
     processed_text = processed_text.replace('未找到', '\n未找到\n')
 
-    # --- 步驟 2: 分詞 ---
+    # 分詞
     tokens = re.split(r'[\s,;]+', processed_text)
     
     final_domains = []
     
     for token in tokens:
         token = token.strip()
-        if not token: continue # 只有完全空白的才跳過
+        if not token: continue 
         
-        # --- 步驟 3: 清洗 ---
+        # 清洗
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
         
-        # 移除前後雜訊 (保留中文以便顯示 '未找到')
+        # 移除前後雜訊
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         
         if clean:
@@ -53,10 +52,12 @@ def parse_input_raw(raw_text):
     
     return final_domains
 
-# --- 檢測函式 ---
+# --- 檢測函式 (GeoIP 增強版) ---
 
 def get_dns_geoip(domain):
     result = {"CNAME": "-", "IP": "-", "Country": "-", "City": "-", "ISP": "-"}
+    
+    # 1. DNS 查詢 (速度快，不用太擔心被擋)
     try:
         cname_answers = dns.resolver.resolve(domain, 'CNAME')
         result["CNAME"] = str(cname_answers[0].target).rstrip('.')
@@ -72,20 +73,49 @@ def get_dns_geoip(domain):
             ip_list = list(set([ai[4][0] for ai in ais]))
         except: pass 
 
+    # 2. GeoIP 查詢 (重點修改：加入重試機制)
     if ip_list:
         result["IP"] = ", ".join(ip_list)
-        try:
-            first_ip = ip_list[0]
-            time.sleep(random.uniform(0.1, 0.3))
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            geo_resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", headers=headers, timeout=5).json()
-            if geo_resp.get("status") == "success":
-                result["Country"] = geo_resp.get("country", "-")
-                result["City"] = geo_resp.get("city", "-")
-                result["ISP"] = geo_resp.get("isp", "-")
-        except: pass
+        first_ip = ip_list[0]
+        
+        # 最多重試 3 次
+        for attempt in range(3):
+            try:
+                # 隨機延遲 0.5 ~ 1.5 秒 (稍微放慢速度)
+                time.sleep(random.uniform(0.5, 1.5))
+                
+                # 隨機 UA
+                user_agents = [
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+                    'Mozilla/5.0 (X11; Linux x86_64)'
+                ]
+                headers = {'User-Agent': random.choice(user_agents)}
+                
+                # 發送請求
+                resp = requests.get(
+                    f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", 
+                    headers=headers, 
+                    timeout=5
+                )
+                
+                # 如果遇到 429 (Too Many Requests)，休息久一點再試
+                if resp.status_code == 429:
+                    wait_time = 2 * (attempt + 1) # 2s, 4s, 6s...
+                    time.sleep(wait_time)
+                    continue
+
+                geo_data = resp.json()
+                if geo_data.get("status") == "success":
+                    result["Country"] = geo_data.get("country", "-")
+                    result["City"] = geo_data.get("city", "-")
+                    result["ISP"] = geo_data.get("isp", "-")
+                    break # 成功就跳出迴圈
+            except:
+                time.sleep(1) # 發生連線錯誤，休息 1 秒再試
     else:
         result["IP"] = "No Record"
+        
     return result
 
 def get_ssl_info(domain):
@@ -152,7 +182,6 @@ def process_single_domain(args):
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", "Global Ping": "-"
     }
     
-    # 針對中文 "未找到" 的特殊處理
     if "未找到" in domain:
         result_dict["IPs"] = "❌ Source Not Found"
         return (index, result_dict)
@@ -181,14 +210,16 @@ def process_single_domain(args):
 # --- UI 介面 ---
 
 st.title("🌐 域名檢測 (有問題請找Andy Huang)")
-st.caption("Auto-fix enabled: 已啟用自動修復黏連資料 (如 .twwww)")
+st.caption("Auto-fix enabled: 已啟用自動修復黏連資料 (如 .twwww) + GeoIP 強力重試")
 
 with st.sidebar:
     st.header("⚙️ 掃描設定")
     check_dns = st.checkbox("DNS & GeoIP", value=True)
     check_ssl = st.checkbox("SSL & TLS 1.3", value=True)
     check_ping = st.checkbox("Global Ping", value=True)
-    workers = st.slider("併發執行緒", 1, 5, 2)
+    
+    # 🔥 重要建議：大量資料掃描時，請將滑桿調低
+    workers = st.slider("併發執行緒 (1000筆以上建議設為 2)", 1, 5, 2)
 
 raw_input = st.text_area("請直接貼上你的資料 (不管多亂)", height=250)
 
@@ -200,9 +231,9 @@ if st.button("🚀 開始掃描", type="primary"):
     if not domain_list:
         st.warning("輸入為空")
     else:
-        st.info(f"✅ 成功辨識出 {len(domain_list)} 筆資料 (包含 '未找到')")
+        st.info(f"✅ 成功辨識出 {len(domain_list)} 筆資料")
         
-        # --- 這裡就是修正的地方：先準備好參數列表 ---
+        # 修正變數定義順序，避免 NameError
         task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
         
         results = []
@@ -210,7 +241,6 @@ if st.button("🚀 開始掃描", type="primary"):
         status_text = st.empty()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            # 使用準備好的 task_args，不會再報錯了
             future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args}
             
             completed_count = 0
