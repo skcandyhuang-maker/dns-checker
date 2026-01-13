@@ -12,7 +12,7 @@ from datetime import datetime
 from OpenSSL import crypto
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (防沾黏修復版)", layout="wide")
+st.set_page_config(page_title="域名檢測 (防沾黏最終修復版)", layout="wide")
 
 # --- 核心：智慧提取與防沾黏 ---
 
@@ -23,18 +23,16 @@ def parse_input_raw(raw_text):
     2. 保留無效格式 (如 '未找到') 以便核對數量
     """
     # --- 步驟 1: 手術刀切分黏連 ---
-    # 你的資料特徵是 .tw 後面黏著 www，這裡用正則表達式強制切開
-    # 找 (.tw|.com|.net) 後面直接接 (www|http) 的情況
+    # 找 (.tw|.com|.net|.org|.biz|.cn) 後面直接接 (www|http) 的情況
     processed_text = re.sub(r'(\.tw|\.com|\.net|\.org|\.biz|\.cn)(www|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     
     # 再次處理常見的 http 黏連
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     
-    # 處理 "未找到" 這種中文黏在一起的情況 (視需求可調整)
+    # 處理 "未找到" 這種中文黏在一起的情況
     processed_text = processed_text.replace('未找到', '\n未找到\n')
 
     # --- 步驟 2: 分詞 ---
-    # 使用分隔符號切分 (換行, 空白, 逗號, 分號)
     tokens = re.split(r'[\s,;]+', processed_text)
     
     final_domains = []
@@ -47,7 +45,7 @@ def parse_input_raw(raw_text):
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
         
-        # 移除前後雜訊
+        # 移除前後雜訊 (保留中文以便顯示 '未找到')
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         
         if clean:
@@ -55,7 +53,7 @@ def parse_input_raw(raw_text):
     
     return final_domains
 
-# --- 檢測函式 (維持不變) ---
+# --- 檢測函式 ---
 
 def get_dns_geoip(domain):
     result = {"CNAME": "-", "IP": "-", "Country": "-", "City": "-", "ISP": "-"}
@@ -204,19 +202,19 @@ if st.button("🚀 開始掃描", type="primary"):
     else:
         st.info(f"✅ 成功辨識出 {len(domain_list)} 筆資料 (包含 '未找到')")
         
+        # --- 這裡就是修正的地方：先準備好參數列表 ---
+        task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
+        
         results = []
         progress_bar = st.progress(0)
         status_text = st.empty()
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args for task_args in [[(idx, dom, current_config) for idx, dom in indexed_domains]]}
-            # Note: loop logic simplified for clarity in threading
-            
-            # 正確的 ThreadPool 寫法
-            futures = {executor.submit(process_single_domain, arg): arg for arg in [(idx, dom, current_config) for idx, dom in indexed_domains]}
+            # 使用準備好的 task_args，不會再報錯了
+            future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args}
             
             completed_count = 0
-            for future in concurrent.futures.as_completed(futures):
+            for future in concurrent.futures.as_completed(future_to_domain):
                 data = future.result()
                 if data: results.append(data)
                 completed_count += 1
