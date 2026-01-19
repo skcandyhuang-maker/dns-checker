@@ -10,11 +10,60 @@ import random
 import re
 from datetime import datetime
 from OpenSSL import crypto
+import urllib3
+
+# 關閉 SSL 警告
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="域名檢測 (Multi-IP版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具", layout="wide")
 
-# --- 輔助：雙欄位判別邏輯 ---
+# ==========================================
+#  共用輔助函式
+# ==========================================
+
+def get_dns_resolver():
+    """建立自訂的 DNS 解析器"""
+    resolver = dns.resolver.Resolver()
+    resolver.nameservers = ['8.8.8.8', '1.1.1.1'] 
+    resolver.timeout = 5
+    resolver.lifetime = 5
+    return resolver
+
+def parse_input_raw(raw_text):
+    """
+    萬能分詞與清洗
+    支援分隔符號：換行(\n)、逗號(,)、分號(;)、空白(space)
+    """
+    # 1. 先處理黏在一起的網址 (針對域名)
+    processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
+    processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
+    processed_text = processed_text.replace('未找到', '\n未找到\n')
+    
+    # 2. 核心切分邏輯：使用正則表達式同時切割 [換行, 逗號, 分號, 空白]
+    # r'[\s,;]+' 代表：只要遇到 空白(\s)、逗號(,) 或 分號(;) 的組合，都切開
+    tokens = re.split(r'[\s,;]+', processed_text)
+    
+    final_items = []
+    for token in tokens:
+        token = token.strip()
+        if not token: continue 
+        
+        # 移除常見雜訊
+        clean = token.replace('https://', '').replace('http://', '')
+        clean = clean.split('/')[0].split('?')[0].split(':')[0]
+        # 移除前後非英數字元 (保留中文與點)
+        clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
+        
+        if clean: 
+            final_items.append(clean)
+            
+    # 去重 (Optionally) - 這裡保留原始輸入順序與重複項，若需去重可加 set
+    return final_items
+
+# ==========================================
+#  核心功能模組
+# ==========================================
 
 def detect_providers(cname_record, isp_name):
     cname = cname_record.lower()
@@ -22,21 +71,18 @@ def detect_providers(cname_record, isp_name):
     cdn_found = "-"
     cloud_found = "-"
     
-    # 1. CDN 特徵庫
     cdn_sigs = {
         "Cloudflare": ["cloudflare", "cdn.cloudflare.net"],
         "AWS CloudFront": ["cloudfront.net"],
-        "Akamai": ["akamai", "edgekey", "akamaiedge", "acadn"],
+        "Akamai": ["akamai", "edgekey", "akamaiedge"],
         "Azure CDN": ["azureedge", "msecnd"],
         "Fastly": ["fastly"],
         "Imperva": ["incapdns", "imperva"],
-        "Edgio (EdgeCast)": ["edgecast", "systemcdn", "transactcdn"],
+        "Edgio": ["edgecast", "systemcdn"],
         "CDNetworks": ["cdnetworks", "panthercdn"],
-        "Wangsu (網宿)": ["wswebpic", "wscdns", "chinanetcenter"],
+        "Wangsu": ["wswebpic", "wscdns"],
         "Tencent CDN": ["cdntip"],
         "Alibaba CDN": ["kunlun", "alikunlun"],
-        "Gcore": ["gcore"],
-        "BunnyCDN": ["bunnycdn"],
     }
     
     for provider, keywords in cdn_sigs.items():
@@ -50,22 +96,13 @@ def detect_providers(cname_record, isp_name):
         if "cloudflare" in isp: cdn_found = "⚡ Cloudflare"
         elif "akamai" in isp: cdn_found = "⚡ Akamai"
         elif "fastly" in isp: cdn_found = "⚡ Fastly"
-        elif "imperva" in isp: cdn_found = "⚡ Imperva"
-        elif "edgecast" in isp or "edgio" in isp: cdn_found = "⚡ Edgio"
 
-    # 2. Cloud/Hosting 特徵庫
     if cdn_found == "-":
         cloud_sigs = {
             "AWS": ["amazon", "amazonaws"],
             "Google Cloud": ["google", "googleusercontent"],
-            "Microsoft Azure": ["microsoft", "azure"],
-            "Alibaba Cloud": ["alibaba", "aliyun"],
-            "Tencent Cloud": ["tencent"],
-            "DigitalOcean": ["digitalocean"],
-            "Linode": ["linode"],
-            "Oracle Cloud": ["oracle"],
-            "Hetzner": ["hetzner"],
-            "OVH": ["ovh"],
+            "Azure": ["microsoft", "azure"],
+            "Alibaba": ["alibaba", "aliyun"],
         }
         for provider, keywords in cloud_sigs.items():
             for kw in keywords:
@@ -76,112 +113,7 @@ def detect_providers(cname_record, isp_name):
 
     return cdn_found, cloud_found
 
-# --- 核心：萬能智慧分詞 ---
-
-def parse_input_raw(raw_text):
-    processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
-    processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
-    processed_text = processed_text.replace('未找到', '\n未找到\n')
-
-    tokens = re.split(r'[\s,;]+', processed_text)
-    final_domains = []
-    
-    for token in tokens:
-        token = token.strip()
-        if not token: continue 
-        clean = token.replace('https://', '').replace('http://', '')
-        clean = clean.split('/')[0].split('?')[0].split(':')[0]
-        clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
-        if clean: final_domains.append(clean)
-    
-    return final_domains
-
-# --- 檢測函式 ---
-
-def get_dns_geoip(domain):
-    result = {"CNAME": "-", "IP": "-", "Country": "-", "City": "-", "ISP": "-"}
-    try:
-        cname_answers = dns.resolver.resolve(domain, 'CNAME')
-        result["CNAME"] = str(cname_answers[0].target).rstrip('.')
-    except: pass 
-
-    ip_list = []
-    try:
-        a_answers = dns.resolver.resolve(domain, 'A')
-        ip_list = [str(r.address) for r in a_answers]
-    except:
-        try:
-            ais = socket.getaddrinfo(domain, 0, socket.AF_INET, socket.SOCK_STREAM)
-            ip_list = list(set([ai[4][0] for ai in ais]))
-        except: pass 
-
-    if ip_list:
-        result["IP"] = ", ".join(ip_list)
-        first_ip = ip_list[0]
-        
-        if first_ip.endswith('.'):
-             result["IP"] = f"{first_ip} (Incomplete)"
-             return result
-
-        for attempt in range(4):
-            try:
-                sleep_time = random.uniform(1.0, 2.0) + (attempt * 1.5)
-                time.sleep(sleep_time)
-                
-                uas = [
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-                ]
-                headers = {'User-Agent': random.choice(uas)}
-                
-                resp = requests.get(
-                    f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", 
-                    headers=headers, 
-                    timeout=5
-                )
-                if resp.status_code == 429: continue
-                if resp.status_code == 200:
-                    geo_data = resp.json()
-                    if geo_data.get("status") == "success":
-                        result["Country"] = geo_data.get("country", "-")
-                        result["City"] = geo_data.get("city", "-")
-                        result["ISP"] = geo_data.get("isp", "-")
-                        break
-            except: time.sleep(1)
-    else:
-        result["IP"] = "No Record"
-        
-    return result
-
-def get_ssl_info(domain):
-    result = {"SSL_Issuer": "-", "SSL_Days_Left": "-", "TLS_1.3_Status": "❌", "Actual_Protocol": "-"}
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    conn = None
-    try:
-        sock = socket.create_connection((domain, 443), timeout=5)
-        conn = context.wrap_socket(sock, server_hostname=domain)
-        protocol_ver = conn.version()
-        result["Actual_Protocol"] = protocol_ver
-        result["TLS_1.3_Status"] = "✅ Yes" if protocol_ver == 'TLSv1.3' else "❌ No"
-        cert_bin = conn.getpeercert(binary_form=True)
-        x509 = crypto.load_certificate(crypto.FILETYPE_ASN1, cert_bin)
-        issuer_components = x509.get_issuer().get_components()
-        issuer_cn = [v.decode() for k, v in issuer_components if k == b'CN']
-        issuer_o = [v.decode() for k, v in issuer_components if k == b'O']
-        result["SSL_Issuer"] = issuer_cn[0] if issuer_cn else (issuer_o[0] if issuer_o else "Unknown")
-        not_after = x509.get_notAfter().decode('ascii')
-        exp_date = datetime.strptime(not_after, '%Y%m%d%H%M%SZ')
-        days_left = (exp_date - datetime.now()).days
-        result["SSL_Days_Left"] = days_left
-    except Exception as e:
-        result["Actual_Protocol"] = "Connect Fail"
-    finally:
-        if conn: conn.close()
-    return result
-
-def run_globalping(domain):
+def run_globalping_api(domain):
     url = "https://api.globalping.io/v1/measurements"
     headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/json'}
     payload = {"limit": 2, "locations": [], "target": domain, "type": "http", "measurementOptions": {"protocol": "HTTPS"}}
@@ -190,6 +122,7 @@ def run_globalping(domain):
         try:
             time.sleep(random.uniform(2.0, 4.0) + attempt)
             resp = requests.post(url, json=payload, headers=headers, timeout=10)
+            
             if resp.status_code == 202:
                 ms_id = resp.json()['id']
                 for _ in range(10):
@@ -211,149 +144,307 @@ def run_globalping(domain):
         except: time.sleep(1)
     return "Too Busy"
 
-def process_single_domain(args):
-    index, domain, config = args
-    result_dict = {
-        "Domain": domain, 
-        "CDN Provider": "-", 
-        "Cloud/Hosting": "-",
-        "Multi-IP": "-",     # 新增欄位：Multi-IP
-        "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
-        "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", "Global Ping": "-"
+def run_simple_ping(domain):
+    headers = {
+	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     }
-    
-    if "未找到" in domain:
-        result_dict["IPs"] = "❌ Source Not Found"
-        return (index, result_dict)
+	
+    try:
+        resp = requests.get(f"https://{domain}", timeout=5, headers=headers, verify=False)
+        return f"✅ {resp.status_code}"
+    except:
+        try:
+            resp = requests.get(f"http://{domain}", timeout=5, headers=headers)
+            return f"⚠️ {resp.status_code} (HTTP)"
+        except:
+            return "❌ Fail"
 
+def process_domain_audit(args):
+    index, domain, config = args
+    result = {
+        "Domain": domain, "CDN Provider": "-", "Cloud/Hosting": "-", "Multi-IP": "-",
+        "CNAME": "-", "IPs": "-", "Country": "-", "City": "-", "ISP": "-",
+        "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", 
+        "Global Ping": "-", "Simple Ping": "-"
+    }
+
+    if "未找到" in domain:
+        result["IPs"] = "❌ Source Not Found"
+        return (index, result)
     if '.' not in domain or len(domain) < 3:
-        result_dict["IPs"] = "❌ Format Error"
-        return (index, result_dict)
+        result["IPs"] = "❌ Format Error"
+        return (index, result)
 
     try:
+        # DNS
         if config['dns']:
-            dns_data = get_dns_geoip(domain)
-            cdn, cloud = detect_providers(dns_data["CNAME"], dns_data["ISP"])
-            
-            # --- Multi-IP 判斷邏輯 ---
-            ip_str = dns_data["IP"]
-            multi_ip_status = "-"
-            if "," in ip_str and "Record" not in ip_str and "Incomplete" not in ip_str:
-                count = len(ip_str.split(','))
-                multi_ip_status = f"✅ Yes ({count})"
-            # -----------------------
+            resolver = get_dns_resolver()
+            try:
+                cname_ans = resolver.resolve(domain, 'CNAME')
+                result["CNAME"] = str(cname_ans[0].target).rstrip('.')
+            except: pass
 
-            result_dict.update({
-                "CDN Provider": cdn,
-                "Cloud/Hosting": cloud,
-                "Multi-IP": multi_ip_status, # 更新 Multi-IP
-                "CNAME": dns_data["CNAME"],
-                "IPs": dns_data["IP"],
-                "Country": dns_data["Country"],
-                "City": dns_data["City"],
-                "ISP": dns_data["ISP"]
-            })
-        
-        if config['ssl']:
-            ssl_data = get_ssl_info(domain)
-            result_dict.update({"TLS 1.3": ssl_data["TLS_1.3_Status"], "Protocol": ssl_data["Actual_Protocol"], "Issuer": ssl_data["SSL_Issuer"], "SSL Days": ssl_data["SSL_Days_Left"]})
-        
-        if config['ping']:
-            gp_result = run_globalping(domain)
-            result_dict["Global Ping"] = gp_result
-            
-        return (index, result_dict)
-    except Exception as e:
-        return (index, {
-            "Domain": domain, "CDN Provider": "Error", "Cloud/Hosting": "Error", "Multi-IP": "-", "CNAME": "Error", "IPs": str(e),
-            "Country": "-", "City": "-", "ISP": "-", "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", "Global Ping": "-"
-        })
+            ip_list = []
+            try:
+                a_ans = resolver.resolve(domain, 'A')
+                ip_list = [str(r.address) for r in a_ans]
+            except:
+                try:
+                    ais = socket.getaddrinfo(domain, 0, socket.AF_INET, socket.SOCK_STREAM)
+                    ip_list = list(set([ai[4][0] for ai in ais]))
+                except: pass
 
-# --- UI 介面 ---
-
-st.title("🌐 域名檢測 (Multi-IP 版)")
-st.caption("✅ CDN/雲端判別 ✅ Multi-IP 偵測 ✅ 自動修復黏連 ✅ 抗 API 封鎖")
-
-with st.sidebar:
-    st.header("⚙️ 掃描設定")
-    check_dns = st.checkbox("DNS & GeoIP & Provider", value=True)
-    check_ssl = st.checkbox("SSL & TLS 1.3", value=True)
-    check_ping = st.checkbox("Global Ping", value=True)
-    workers = st.slider("掃描速度 (建議維持在 2)", 1, 5, 2)
-
-raw_input = st.text_area("請貼上資料", height=250)
-
-if st.button("🚀 開始掃描", type="primary"):
-    domain_list = parse_input_raw(raw_input)
-    indexed_domains = list(enumerate(domain_list))
-    current_config = {'dns': check_dns, 'ssl': check_ssl, 'ping': check_ping}
-    
-    if not domain_list:
-        st.warning("輸入為空")
-    else:
-        st.success(f"已識別 {len(domain_list)} 筆資料")
-        
-        task_args = [(idx, dom, current_config) for idx, dom in indexed_domains]
-        results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_to_domain = {executor.submit(process_single_domain, arg): arg for arg in task_args}
-            
-            completed_count = 0
-            for future in concurrent.futures.as_completed(future_to_domain):
-                data = future.result()
-                if data: results.append(data)
-                completed_count += 1
-                progress_bar.progress(completed_count / len(domain_list))
-                status_text.text(f"掃描中... ({completed_count}/{len(domain_list)})")
-
-        st.success("掃描完成！")
-        results.sort(key=lambda x: x[0])
-        final_data = [x[1] for x in results]
-        df = pd.DataFrame(final_data)
-        
-        def style_dataframe(row):
-            styles = [''] * len(row)
-            
-            # CDN Provider (綠色粗體)
-            if "⚡" in str(row['CDN Provider']):
-                styles[1] = 'color: #009900; font-weight: bold;'
-            
-            # Cloud/Hosting (藍色)
-            if "☁️" in str(row['Cloud/Hosting']):
-                styles[2] = 'color: #0000FF;'
-
-            # Multi-IP (綠色粗體) - Index 3
-            if "Yes" in str(row['Multi-IP']):
-                styles[3] = 'color: #009900; font-weight: bold;'
-
-            # SSL Days (紅色/黃色背景)
-            if isinstance(row['SSL Days'], int):
-                ssl_idx = df.columns.get_loc("SSL Days")
-                if row['SSL Days'] < 30: styles[ssl_idx] = 'background-color: #ffcccc'
-                elif row['SSL Days'] < 90: styles[ssl_idx] = 'background-color: #ffffcc'
-
-            if "No" in str(row['TLS 1.3']) and row['TLS 1.3'] != "-":
-                 tls_idx = df.columns.get_loc("TLS 1.3")
-                 styles[tls_idx] = 'color: red; font-weight: bold;'
-                 
-            if "Format Error" in str(row['IPs']) or "Not Found" in str(row['IPs']):
-                return ['background-color: #eeeeee; color: #888888'] * len(row)
+            if ip_list:
+                result["IPs"] = ", ".join(ip_list)
+                if len(ip_list) > 1: result["Multi-IP"] = f"✅ Yes ({len(ip_list)})"
                 
-            return styles
+                # GeoIP
+                first_ip = ip_list[0]
+                if not first_ip.endswith('.'):
+                    for attempt in range(3):
+                        try:
+                            time.sleep(random.uniform(0.5, 1.5))
+                            resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", timeout=5).json()
+                            if resp.get("status") == "success":
+                                result["Country"] = resp.get("country", "-")
+                                result["City"] = resp.get("city", "-")
+                                result["ISP"] = resp.get("isp", "-")
+                                break
+                        except: time.sleep(1)
+                
+                cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
+                result["CDN Provider"] = cdn
+                result["Cloud/Hosting"] = cloud
+            else:
+                result["IPs"] = "No Record"
 
-        st.dataframe(
-            df.style.apply(style_dataframe, axis=1), 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "CDN Provider": st.column_config.TextColumn("CDN Provider", width="small"),
-                "Cloud/Hosting": st.column_config.TextColumn("Cloud/Hosting", width="small"),
-                "Multi-IP": st.column_config.TextColumn("Multi-IP", width="small"),
-                "IPs": st.column_config.TextColumn("IP Addresses", width="medium"),
-            }
-        )
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 下載報告 CSV", csv, "dns_audit_multiip.csv", "text/csv")
+        # SSL
+        if config['ssl']:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            conn = None
+            try:
+                sock = socket.create_connection((domain, 443), timeout=5)
+                conn = ctx.wrap_socket(sock, server_hostname=domain)
+                result["Actual_Protocol"] = conn.version()
+                result["TLS 1.3"] = "✅ Yes" if conn.version() == 'TLSv1.3' else "❌ No"
+                cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
+                subject = cert.get_issuer()
+                cn = subject.CN if subject.CN else "Unknown"
+                result["Issuer"] = cn
+                not_after = datetime.strptime(cert.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
+                result["SSL Days"] = (not_after - datetime.now()).days
+            except: 
+                result["Protocol"] = "Connect Fail"
+            finally:
+                if conn: conn.close()
+
+        if config['global_ping']:
+            result["Global Ping"] = run_globalping_api(domain)
+
+        if config['simple_ping']:
+            result["Simple Ping"] = run_simple_ping(domain)
+
+    except Exception as e:
+        result["IPs"] = str(e)
+    
+    return (index, result)
+
+# ==========================================
+#  功能模組 B: IP 反查 (VT)
+# ==========================================
+
+def check_single_domain_status(domain, target_ip):
+    resolver = get_dns_resolver()
+    status_result = {
+        "Domain": domain,
+        "Current_IP": "-",
+        "Match_Input_IP": "❌ No",
+        "HTTP_Status": "-"
+    }
+    
+    try:
+        a_ans = resolver.resolve(domain, 'A')
+        current_ips = [str(r.address) for r in a_ans]
+        status_result["Current_IP"] = ", ".join(current_ips)
+        
+        if target_ip in current_ips:
+            status_result["Match_Input_IP"] = "✅ Yes"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            try:
+                resp = requests.get(f"https://{domain}", timeout=5, headers=headers, verify=False)
+                status_result["HTTP_Status"] = f"✅ {resp.status_code} (HTTPS)"
+            except:
+                try:
+                    resp = requests.get(f"http://{domain}", timeout=5, headers=headers)
+                    status_result["HTTP_Status"] = f"✅ {resp.status_code} (HTTP)"
+                except:
+                    status_result["HTTP_Status"] = "❌ Unreachable"
+        else:
+             status_result["HTTP_Status"] = "-"
+    except:
+        status_result["Current_IP"] = "No Record"
+        
+    return status_result
+
+def process_ip_vt_lookup(ip, api_key):
+    url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}/resolutions"
+    headers = {"x-apikey": api_key}
+    try:
+        params = {"limit": 40}
+        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if "data" in data:
+                domains = list(set([item['attributes']['host_name'] for item in data['data']]))
+                return "Success", domains
+            return "Success", []
+        elif resp.status_code == 429: return "RateLimit", []
+        elif resp.status_code == 401: return "AuthError", []
+        else: return f"Error {resp.status_code}", []
+    except Exception as e:
+        return f"Exception: {str(e)}", []
+
+
+# ==========================================
+#  UI 主程式
+# ==========================================
+
+tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
+
+# --- 分頁 1: 域名檢測 ---
+with tab1:
+    st.header("批量域名體檢")
+    
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.subheader("設定")
+        check_dns = st.checkbox("DNS & GeoIP", value=True)
+        check_ssl = st.checkbox("SSL & TLS", value=True)
+        
+        st.divider()
+        st.caption("連線測試")
+        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從你的電腦直接連線測試")
+        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="呼叫外部 API 從國外節點測試 (速度較慢)")
+        
+        st.divider()
+        workers = st.slider("掃描速度", 1, 5, 3)
+
+    with col2:
+        raw_input = st.text_area("輸入域名 (支援混亂格式)", height=150, placeholder="example.com\nwww.google.com")
+        if st.button("🚀 開始掃描域名", type="primary"):
+            domain_list = parse_input_raw(raw_input)
+            if not domain_list:
+                st.warning("請輸入域名")
+            else:
+                config = {
+                    'dns': check_dns, 
+                    'ssl': check_ssl, 
+                    'global_ping': check_global_ping, 
+                    'simple_ping': check_simple_ping
+                }
+                indexed_domains = list(enumerate(domain_list))
+                st.info(f"開始掃描 {len(domain_list)} 筆資料...")
+                
+                results = []
+                progress_bar = st.progress(0)
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
+                    completed = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        data = future.result()
+                        results.append(data[1])
+                        completed += 1
+                        progress_bar.progress(completed / len(domain_list))
+                
+                df = pd.DataFrame(results)
+                
+                def highlight_rows(row):
+                    styles = [''] * len(row)
+                    if "⚡" in str(row.get('CDN Provider', '')):
+                        styles[1] = 'color: #009900; font-weight: bold;'
+                    if "✅" in str(row.get('Multi-IP', '')):
+                        styles[3] = 'color: #009900;'
+                    if "✅" in str(row.get('Simple Ping', '')):
+                        simple_idx = df.columns.get_loc("Simple Ping")
+                        styles[simple_idx] = 'color: #009900; font-weight: bold;'
+                    return styles
+                
+                st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
+                st.download_button("下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), "domain_audit.csv")
+
+
+# --- 分頁 2: IP 反查 ---
+with tab2:
+    st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
+    
+    api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
+    
+    # 修改提示文字，明確告知支援逗號分隔
+    ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
+    
+    if st.button("🕵️ 開始反查 IP", type="primary"):
+        if not api_key:
+            st.error("請輸入 API Key！")
+        else:
+            # 這裡會呼叫更新後的 parse_input_raw
+            ip_list = parse_input_raw(ip_input)
+            
+            if not ip_list:
+                st.warning("請輸入 IP")
+            else:
+                st.toast(f"準備查詢 {len(ip_list)} 個 IP...")
+                final_report = []
+                vt_counter = 0
+                status_log = st.empty()
+                
+                for i, ip in enumerate(ip_list):
+                    status_log.markdown(f"**[{i+1}/{len(ip_list)}] 正在查詢 VT:** `{ip}` ...")
+                    status, domains = process_ip_vt_lookup(ip, api_key)
+                    
+                    if status == "Success":
+                        if not domains:
+                            final_report.append({"Input_IP": ip, "Domain": "(no data)", "Match_IP": "-", "HTTP": "-"})
+                        else:
+                            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                                verify_futures = {executor.submit(check_single_domain_status, dom, ip): dom for dom in domains}
+                                for future in concurrent.futures.as_completed(verify_futures):
+                                    v_res = future.result()
+                                    final_report.append({
+                                        "Input_IP": ip,
+                                        "Domain": v_res["Domain"],
+                                        "Match_IP": v_res["Match_Input_IP"],
+                                        "HTTP": v_res["HTTP_Status"]
+                                    })
+                    elif status == "RateLimit":
+                        st.error("API 速率限制 (429)！")
+                        break
+                    elif status == "AuthError":
+                        st.error("API Key 錯誤 (401)！")
+                        break
+                    else:
+                        final_report.append({"Input_IP": ip, "Domain": f"Error: {status}", "Match_IP": "-", "HTTP": "-"})
+                    
+                    vt_counter += 1
+                    if i < len(ip_list) - 1:
+                        if vt_counter % 4 == 0:
+                            for sec in range(60, 0, -1):
+                                status_log.warning(f"⏳ Rate Limit 冷卻中... 剩餘 {sec} 秒")
+                                time.sleep(1)
+                        else:
+                            time.sleep(15)
+
+                status_log.success("查詢完成！")
+                if final_report:
+                    df_vt = pd.DataFrame(final_report)
+                    def highlight_vt(row):
+                        styles = [''] * len(row)
+                        if "Yes" in str(row['Match_IP']) and "200" in str(row['HTTP']):
+                            return ['background-color: #d4edda; color: #155724'] * len(row)
+                        return styles
+                    st.dataframe(df_vt.style.apply(highlight_vt, axis=1), use_container_width=True)
+                    st.download_button("下載反查報告", df_vt.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_check.csv")
