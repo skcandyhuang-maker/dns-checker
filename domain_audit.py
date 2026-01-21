@@ -18,7 +18,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具 (DB版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (DB終極版)", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -26,40 +26,20 @@ st.set_page_config(page_title="Andy的全能網管工具 (DB版)", layout="wide"
 DB_FILE = "audit_data.db"
 
 def init_db():
-    """初始化資料庫，建立必要的 Tables"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    
-    # 建立域名檢測表
     c.execute('''
         CREATE TABLE IF NOT EXISTS domain_audit (
             domain TEXT PRIMARY KEY,
-            cdn_provider TEXT,
-            cloud_hosting TEXT,
-            multi_ip TEXT,
-            cname TEXT,
-            ips TEXT,
-            country TEXT,
-            city TEXT,
-            isp TEXT,
-            tls_1_3 TEXT,
-            protocol TEXT,
-            issuer TEXT,
-            ssl_days TEXT,
-            global_ping TEXT,
-            simple_ping TEXT,
+            cdn_provider TEXT, cloud_hosting TEXT, multi_ip TEXT, cname TEXT, ips TEXT,
+            country TEXT, city TEXT, isp TEXT, tls_1_3 TEXT, protocol TEXT, issuer TEXT,
+            ssl_days TEXT, global_ping TEXT, simple_ping TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
-    # 建立 IP 反查表
     c.execute('''
         CREATE TABLE IF NOT EXISTS ip_reverse (
-            input_ip TEXT,
-            domain TEXT,
-            current_resolved_ip TEXT,
-            ip_match TEXT,
-            http_status TEXT,
+            input_ip TEXT, domain TEXT, current_resolved_ip TEXT, ip_match TEXT, http_status TEXT,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (input_ip, domain)
         )
@@ -68,21 +48,16 @@ def init_db():
     conn.close()
 
 def get_existing_domains():
-    """取得已經掃描過的域名列表"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
         c.execute("SELECT domain FROM domain_audit")
-        rows = c.fetchall()
-        return set([r[0] for r in rows])
-    except:
-        return set()
-    finally:
-        conn.close()
+        return set([r[0] for r in c.fetchall()])
+    except: return set()
+    finally: conn.close()
 
 def save_domain_result(data):
-    """儲存單筆域名結果 (Thread-safe by creating new connection)"""
-    conn = sqlite3.connect(DB_FILE, timeout=30) # 增加 timeout 避免鎖定
+    conn = sqlite3.connect(DB_FILE, timeout=30)
     c = conn.cursor()
     try:
         c.execute('''
@@ -98,32 +73,23 @@ def save_domain_result(data):
             data['Global Ping'], data['Simple Ping']
         ))
         conn.commit()
-    except Exception as e:
-        print(f"DB Error: {e}")
-    finally:
-        conn.close()
+    except Exception as e: print(f"DB Error: {e}")
+    finally: conn.close()
 
 def get_all_domain_results():
-    """讀取所有域名結果供下載"""
     conn = sqlite3.connect(DB_FILE)
     try:
         df = pd.read_sql_query("SELECT * FROM domain_audit", conn)
-        # 重新命名欄位以符合顯示習慣
         df = df.rename(columns={
             "domain": "Domain", "cdn_provider": "CDN Provider", "cloud_hosting": "Cloud/Hosting",
-            "multi_ip": "Multi-IP", "cname": "CNAME", "ips": "IPs",
-            "country": "Country", "city": "City", "isp": "ISP",
-            "tls_1_3": "TLS 1.3", "protocol": "Protocol", "issuer": "Issuer",
-            "ssl_days": "SSL Days", "global_ping": "Global Ping", "simple_ping": "Simple Ping"
+            "multi_ip": "Multi-IP", "cname": "CNAME", "ips": "IPs", "country": "Country", 
+            "city": "City", "isp": "ISP", "tls_1_3": "TLS 1.3", "protocol": "Protocol", 
+            "issuer": "Issuer", "ssl_days": "SSL Days", "global_ping": "Global Ping", 
+            "simple_ping": "Simple Ping"
         })
-        # 移除 updated_at
-        if "updated_at" in df.columns:
-            df = df.drop(columns=["updated_at"])
+        if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
         return df
-    finally:
-        conn.close()
-
-# --- IP 反查 DB 函式 ---
+    finally: conn.close()
 
 def save_ip_result(data):
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -133,15 +99,10 @@ def save_ip_result(data):
             INSERT OR REPLACE INTO ip_reverse (
                 input_ip, domain, current_resolved_ip, ip_match, http_status
             ) VALUES (?, ?, ?, ?, ?)
-        ''', (
-            data['Input_IP'], data['Domain'], data['Current_Resolved_IP'], 
-            data['IP_Match'], data['HTTP_Status']
-        ))
+        ''', (data['Input_IP'], data['Domain'], data['Current_Resolved_IP'], data['IP_Match'], data['HTTP_Status']))
         conn.commit()
-    except Exception as e:
-        print(f"DB Error: {e}")
-    finally:
-        conn.close()
+    except Exception as e: print(f"DB Error: {e}")
+    finally: conn.close()
 
 def get_all_ip_results():
     conn = sqlite3.connect(DB_FILE)
@@ -154,20 +115,17 @@ def get_all_ip_results():
         })
         if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
         return df
-    finally:
-        conn.close()
+    finally: conn.close()
 
 def clear_database():
-    """清空資料庫"""
     if os.path.exists(DB_FILE):
         os.remove(DB_FILE)
         init_db()
 
-# 初始化 DB
 init_db()
 
 # ==========================================
-#  共用輔助函式 (解析與清洗)
+#  共用輔助函式
 # ==========================================
 
 def get_dns_resolver():
@@ -193,7 +151,7 @@ def parse_input_raw(raw_text):
     return final_items
 
 # ==========================================
-#  核心功能模組 A: 域名檢測
+#  核心檢測邏輯
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
@@ -215,7 +173,6 @@ def detect_providers(cname_record, isp_name):
         "Tencent CDN": ["cdntip"],
         "Alibaba CDN": ["kunlun", "alikunlun"],
     }
-    
     for provider, keywords in cdn_sigs.items():
         for kw in keywords:
             if kw in cname:
@@ -241,7 +198,6 @@ def detect_providers(cname_record, isp_name):
                     cloud_found = f"☁️ {provider}"
                     break
             if cloud_found != "-": break
-
     return cdn_found, cloud_found
 
 def run_globalping_api(domain):
@@ -274,9 +230,7 @@ def run_globalping_api(domain):
     return "Too Busy"
 
 def run_simple_ping(domain):
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     try:
         resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
         return f"✅ {resp.status_code}"
@@ -284,8 +238,7 @@ def run_simple_ping(domain):
         try:
             resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
             return f"⚠️ {resp.status_code} (HTTP)"
-        except:
-            return "❌ Fail"
+        except: return "❌ Fail"
 
 def process_domain_audit(args):
     index, domain, config = args
@@ -337,8 +290,7 @@ def process_domain_audit(args):
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
                 result["CDN Provider"] = cdn
                 result["Cloud/Hosting"] = cloud
-            else:
-                result["IPs"] = "No Record"
+            else: result["IPs"] = "No Record"
 
         if config['ssl']:
             ctx = ssl.create_default_context()
@@ -355,22 +307,15 @@ def process_domain_audit(args):
                 result["Issuer"] = issuer_obj.O if issuer_obj.O else (issuer_obj.CN if issuer_obj.CN else "Unknown")
                 not_after = datetime.strptime(cert.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
                 result["SSL Days"] = (not_after - datetime.now()).days
-            except: 
-                result["Protocol"] = "Connect Fail"
+            except: result["Protocol"] = "Connect Fail"
             finally:
                 if conn: conn.close()
 
         if config['global_ping']: result["Global Ping"] = run_globalping_api(domain)
         if config['simple_ping']: result["Simple Ping"] = run_simple_ping(domain)
 
-    except Exception as e:
-        result["IPs"] = str(e)
-    
+    except Exception as e: result["IPs"] = str(e)
     return (index, result)
-
-# ==========================================
-#  功能模組 B: IP 反查 (VT)
-# ==========================================
 
 def check_single_domain_status(domain, target_ip):
     resolver = get_dns_resolver()
@@ -422,110 +367,87 @@ def process_ip_vt_lookup(ip, api_key):
 with st.sidebar:
     st.header("🗄️ 資料庫管理")
     st.caption("所有資料均存於本地 SQLite，關閉程式不會遺失。")
-    
-    # 資料庫重置按鈕
     if st.button("🗑️ 清空資料庫 (重來)", type="secondary"):
         clear_database()
         st.toast("資料庫已清空！")
         time.sleep(1)
         st.rerun()
-    
     st.divider()
-    
     st.subheader("📥 匯出資料")
-    # 匯出域名結果
     df_domains = get_all_domain_results()
     if not df_domains.empty:
-        st.download_button(
-            f"📄 下載域名報告 ({len(df_domains)}筆)", 
-            df_domains.to_csv(index=False).encode('utf-8-sig'), 
-            "domain_audit_db.csv", 
-            "text/csv"
-        )
-    else:
-        st.write("域名資料庫為空")
-        
-    # 匯出 IP 結果
+        st.download_button(f"📄 下載域名報告 ({len(df_domains)}筆)", df_domains.to_csv(index=False).encode('utf-8-sig'), "domain_audit_db.csv", "text/csv")
+    else: st.write("域名資料庫為空")
     df_ips = get_all_ip_results()
     if not df_ips.empty:
-        st.download_button(
-            f"📄 下載 IP 反查報告 ({len(df_ips)}筆)", 
-            df_ips.to_csv(index=False).encode('utf-8-sig'), 
-            "ip_reverse_db.csv", 
-            "text/csv"
-        )
-    else:
-        st.write("IP 反查資料庫為空")
+        st.download_button(f"📄 下載 IP 反查報告 ({len(df_ips)}筆)", df_ips.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_db.csv", "text/csv")
+    else: st.write("IP 反查資料庫為空")
 
 tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
     st.header("批量域名體檢 (DB 自動存檔)")
-    
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
-        check_dns = st.checkbox("DNS 解析", value=True)
-        check_geoip = st.checkbox("GeoIP 查詢", value=True)
-        check_ssl = st.checkbox("SSL & TLS", value=True)
-        check_simple_ping = st.checkbox("Simple Ping", value=True)
-        check_global_ping = st.checkbox("Global Ping", value=True)
+        check_dns = st.checkbox("DNS 解析 (基礎)", value=True, help="解析 A 紀錄與 CNAME，速度快")
+        check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True, help="查詢 IP 的地理位置，需呼叫外部 API，速度較慢")
+        check_ssl = st.checkbox("SSL & TLS 憑證", value=True, help="顯示憑證組織 (O)、過期日與 TLS 1.3 支援")
+        
+        st.subheader("2. 連線測試")
+        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從目前主機發送請求，適合內網或本機測試")
+        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="透過 API 從國外節點測試，速度較慢")
+        
         st.divider()
+        st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
+        
+        # --- 找回你的提示文字 ---
+        st.info("💡 速度設定建議：")
+        st.markdown("""
+        * **1-2 (龜速)**：適合 **1000+** 筆資料。保證 GeoIP 不會被封鎖。
+        * **3 (平衡)**：適合 **100-500** 筆資料。
+        * **4-5 (極速)**：適合 **<100** 筆資料。
+        """)
+        # ---------------------
 
     with col2:
         raw_input = st.text_area("輸入域名 (會自動跳過已掃描項目)", height=150, placeholder="example.com\nwww.google.com")
         if st.button("🚀 開始掃描域名", type="primary"):
             full_list = parse_input_raw(raw_input)
-            
-            # --- 智慧過濾 ---
             existing_domains = get_existing_domains()
             domain_list = [d for d in full_list if d not in existing_domains]
             skipped_count = len(full_list) - len(domain_list)
             
             if not domain_list:
-                if skipped_count > 0:
-                    st.success(f"🎉 所有 {skipped_count} 筆域名都已經在資料庫中了！請直接從側邊欄下載。")
-                else:
-                    st.warning("請輸入域名")
+                if skipped_count > 0: st.success(f"🎉 所有 {skipped_count} 筆域名都已經在資料庫中了！請直接從側邊欄下載。")
+                else: st.warning("請輸入域名")
             else:
-                if skipped_count > 0:
-                    st.info(f"⏩ 已自動跳過 {skipped_count} 筆重複資料，本次將掃描 {len(domain_list)} 筆。")
-                
+                if skipped_count > 0: st.info(f"⏩ 已自動跳過 {skipped_count} 筆重複資料，本次將掃描 {len(domain_list)} 筆。")
                 config = {'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl, 'global_ping': check_global_ping, 'simple_ping': check_simple_ping}
                 indexed_domains = list(enumerate(domain_list))
-                
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                     futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
                     completed = 0
-                    
                     for future in concurrent.futures.as_completed(futures):
                         data = future.result()
-                        row_data = data[1]
-                        
-                        # 存入 SQLite
-                        save_domain_result(row_data)
-                        
+                        save_domain_result(data[1])
                         completed += 1
                         progress_bar.progress(completed / len(domain_list))
                         status_text.text(f"已處理: {completed}/{len(domain_list)} (已存入 DB)")
-                
                 status_text.success("掃描完成！所有資料已寫入資料庫，請從側邊欄下載。")
                 st.balloons()
                 time.sleep(1)
-                st.rerun() # 重新整理以更新側邊欄下載按鈕
-
+                st.rerun()
 
 # --- 分頁 2: IP 反查 ---
 with tab2:
     st.header("IP 反查與存活驗證 (DB 自動存檔)")
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
     ip_input = st.text_area("輸入 IP 清單", height=150, placeholder="8.8.8.8")
-    
     if st.button("🕵️ 開始反查 IP", type="primary"):
         if not api_key: st.error("請輸入 API Key！")
         else:
@@ -535,17 +457,12 @@ with tab2:
                 st.toast(f"準備查詢 {len(ip_list)} 個 IP...")
                 vt_counter = 0
                 status_log = st.empty()
-                
                 for i, ip in enumerate(ip_list):
                     status_log.markdown(f"**[{i+1}/{len(ip_list)}] 正在查詢 VT:** `{ip}` ...")
                     status, domains = process_ip_vt_lookup(ip, api_key)
-                    
-                    # 準備結果列表 (可能有多個域名)
                     rows_to_save = []
-                    
                     if status == "Success":
-                        if not domains:
-                            rows_to_save.append({"Input_IP": ip, "Domain": "(no data)", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
+                        if not domains: rows_to_save.append({"Input_IP": ip, "Domain": "(no data)", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
                         else:
                             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                                 verify_futures = {executor.submit(check_single_domain_status, dom, ip): dom for dom in domains}
@@ -555,13 +472,9 @@ with tab2:
                                         "Input_IP": ip, "Domain": v_res["Domain"],
                                         "Current_Resolved_IP": v_res["Current_Resolved_IP"], "IP_Match": v_res["IP_Match"], "HTTP_Status": v_res["HTTP_Status"]
                                     })
-                    else:
-                        rows_to_save.append({"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
+                    else: rows_to_save.append({"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
                     
-                    # 寫入 DB
-                    for row in rows_to_save:
-                        save_ip_result(row)
-                    
+                    for row in rows_to_save: save_ip_result(row)
                     vt_counter += 1
                     if i < len(ip_list) - 1:
                         if vt_counter % 4 == 0:
@@ -569,7 +482,6 @@ with tab2:
                                 status_log.warning(f"⏳ Rate Limit 冷卻中... 剩餘 {sec} 秒")
                                 time.sleep(1)
                         else: time.sleep(15)
-
                 status_log.success("查詢完成！資料已存入 DB。")
                 st.balloons()
                 time.sleep(1)
