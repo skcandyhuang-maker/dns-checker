@@ -8,6 +8,8 @@ import concurrent.futures
 import time
 import random
 import re
+import os
+import csv
 from datetime import datetime
 from OpenSSL import crypto
 import urllib3
@@ -16,7 +18,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (即時存檔版)", layout="wide")
 
 # ==========================================
 #  共用輔助函式
@@ -31,34 +33,35 @@ def get_dns_resolver():
     return resolver
 
 def parse_input_raw(raw_text):
-    """
-    萬能分詞與清洗
-    支援分隔符號：換行(\n)、逗號(,)、分號(;)、空白(space)
-    並且修復黏在一起的網址
-    """
-    # 1. 先處理黏在一起的網址
+    """萬能分詞與清洗"""
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     processed_text = processed_text.replace('未找到', '\n未找到\n')
-    
-    # 2. 核心切分
     tokens = re.split(r'[\s,;]+', processed_text)
-    
     final_items = []
     for token in tokens:
         token = token.strip()
         if not token: continue 
-        
-        # 移除常見雜訊
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
-        # 移除前後非英數字元 (保留中文與點)
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
-        
-        if clean: 
-            final_items.append(clean)
-            
+        if clean: final_items.append(clean)
     return final_items
+
+def save_to_csv_realtime(filename, data_dict, mode='a'):
+    """即時寫入 CSV (Append 模式)"""
+    file_exists = os.path.isfile(filename)
+    fieldnames = list(data_dict.keys())
+    
+    # 確保目錄存在 (通常是當前目錄)
+    try:
+        with open(filename, mode, newline='', encoding='utf-8-sig') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists or mode == 'w':
+                writer.writeheader()
+            writer.writerow(data_dict)
+    except Exception as e:
+        print(f"Write Error: {e}")
 
 # ==========================================
 #  核心功能模組 A: 域名檢測
@@ -121,7 +124,6 @@ def run_globalping_api(domain):
         try:
             time.sleep(random.uniform(2.0, 4.0) + attempt)
             resp = requests.post(url, json=payload, headers=headers, timeout=10)
-            
             if resp.status_code == 202:
                 ms_id = resp.json()['id']
                 for _ in range(10):
@@ -176,7 +178,6 @@ def process_domain_audit(args):
         return (index, result)
 
     try:
-        # 1. DNS
         if config['dns']:
             resolver = get_dns_resolver()
             try:
@@ -198,7 +199,6 @@ def process_domain_audit(args):
                 result["IPs"] = ", ".join(ip_list)
                 if len(ip_list) > 1: result["Multi-IP"] = f"✅ Yes ({len(ip_list)})"
                 
-                # 2. GeoIP (獨立開關)
                 if config['geoip']:
                     first_ip = ip_list[0]
                     if not first_ip.endswith('.'):
@@ -213,14 +213,12 @@ def process_domain_audit(args):
                                     break
                             except: time.sleep(1)
                 
-                # 3. CDN
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
                 result["CDN Provider"] = cdn
                 result["Cloud/Hosting"] = cloud
             else:
                 result["IPs"] = "No Record"
 
-        # 4. SSL (優先顯示組織)
         if config['ssl']:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -234,8 +232,6 @@ def process_domain_audit(args):
                 
                 cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
                 issuer_obj = cert.get_issuer()
-                
-                # 取得組織名稱 (O) 優先
                 org_name = issuer_obj.O
                 common_name = issuer_obj.CN
                 result["Issuer"] = org_name if org_name else (common_name if common_name else "Unknown")
@@ -290,12 +286,10 @@ def check_single_domain_status(domain, target_ip):
         }
         
         try:
-            # 優先 HTTPS
             resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
             status_result["HTTP_Status"] = f"✅ {resp.status_code}"
         except:
             try:
-                # 候補 HTTP
                 resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
                 status_result["HTTP_Status"] = f"⚠️ {resp.status_code} (HTTP)"
             except:
@@ -332,7 +326,8 @@ tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("批量域名體檢")
+    st.header("批量域名體檢 (支援即時存檔)")
+    st.caption("檔案將自動寫入本地目錄的 `domain_audit_progress.csv`，若中斷可直接查看該檔案。")
     
     col1, col2 = st.columns([1, 3])
     with col1:
@@ -348,14 +343,7 @@ with tab1:
         st.divider()
         st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
-        
-        # 舊有提示：速度建議
-        st.info("💡 速度設定建議：")
-        st.markdown("""
-        * **1-2 (龜速)**：適合 **1000+** 筆資料。保證 GeoIP 不會被封鎖。
-        * **3 (平衡)**：適合 **100-500** 筆資料。
-        * **4-5 (極速)**：適合 **<100** 筆資料。
-        """)
+        st.info("💡 1000+筆資料建議設為 1-2 以防 API 封鎖。")
 
     with col2:
         raw_input = st.text_area("輸入域名 (支援混亂格式)", height=150, placeholder="example.com\nwww.google.com")
@@ -374,18 +362,38 @@ with tab1:
                 indexed_domains = list(enumerate(domain_list))
                 st.info(f"開始掃描 {len(domain_list)} 筆資料...")
                 
+                # 初始化即時存檔檔案
+                temp_file = "domain_audit_progress.csv"
+                if os.path.exists(temp_file):
+                    os.remove(temp_file) # 清除舊的暫存檔
+                
                 results = []
                 progress_bar = st.progress(0)
+                status_text = st.empty()
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                     futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
                     completed = 0
+                    
+                    # 第一次寫入 Header 用
+                    header_written = False
+                    
                     for future in concurrent.futures.as_completed(futures):
                         data = future.result()
-                        results.append(data[1])
+                        row_data = data[1]
+                        results.append(row_data)
+                        
+                        # --- 即時存檔邏輯 ---
+                        save_mode = 'a' if header_written else 'w'
+                        save_to_csv_realtime(temp_file, row_data, mode=save_mode)
+                        header_written = True
+                        # ------------------
+                        
                         completed += 1
                         progress_bar.progress(completed / len(domain_list))
+                        status_text.text(f"已掃描: {completed}/{len(domain_list)} - 自動存檔至 {temp_file}")
                 
+                status_text.success(f"掃描完成！資料已完整儲存至 {temp_file}")
                 df = pd.DataFrame(results)
                 
                 def highlight_rows(row):
@@ -407,7 +415,8 @@ with tab1:
 
 # --- 分頁 2: IP 反查 ---
 with tab2:
-    st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
+    st.header("IP 反查與存活驗證 (支援即時存檔)")
+    st.caption("檔案將自動寫入本地目錄的 `ip_reverse_progress.csv`")
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
     ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
     
@@ -421,6 +430,13 @@ with tab2:
                 st.warning("請輸入 IP")
             else:
                 st.toast(f"準備查詢 {len(ip_list)} 個 IP...")
+                
+                # 初始化即時存檔
+                temp_file_ip = "ip_reverse_progress.csv"
+                if os.path.exists(temp_file_ip):
+                    os.remove(temp_file_ip)
+                header_written_ip = False
+                
                 final_report = []
                 vt_counter = 0
                 status_log = st.empty()
@@ -429,27 +445,34 @@ with tab2:
                     status_log.markdown(f"**[{i+1}/{len(ip_list)}] 正在查詢 VT:** `{ip}` ...")
                     status, domains = process_ip_vt_lookup(ip, api_key)
                     
+                    rows_to_save = []
+                    
                     if status == "Success":
                         if not domains:
-                            final_report.append({
+                            row = {
                                 "Input_IP": ip, 
                                 "Domain": "(no data)", 
                                 "Current_Resolved_IP": "-", 
                                 "IP_Match": "-", 
                                 "HTTP_Status": "-"
-                            })
+                            }
+                            final_report.append(row)
+                            rows_to_save.append(row)
                         else:
                             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                                 verify_futures = {executor.submit(check_single_domain_status, dom, ip): dom for dom in domains}
                                 for future in concurrent.futures.as_completed(verify_futures):
                                     v_res = future.result()
-                                    final_report.append({
+                                    row = {
                                         "Input_IP": ip,
                                         "Domain": v_res["Domain"],
                                         "Current_Resolved_IP": v_res["Current_Resolved_IP"], 
                                         "IP_Match": v_res["IP_Match"],                       
                                         "HTTP_Status": v_res["HTTP_Status"]                  
-                                    })
+                                    }
+                                    final_report.append(row)
+                                    rows_to_save.append(row)
+                                    
                     elif status == "RateLimit":
                         st.error("API 速率限制 (429)！")
                         break
@@ -457,10 +480,19 @@ with tab2:
                         st.error("API Key 錯誤 (401)！")
                         break
                     else:
-                        final_report.append({
+                        row = {
                             "Input_IP": ip, "Domain": f"Error: {status}", 
                             "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"
-                        })
+                        }
+                        final_report.append(row)
+                        rows_to_save.append(row)
+                    
+                    # --- 寫入 CSV ---
+                    for r in rows_to_save:
+                        save_mode = 'a' if header_written_ip else 'w'
+                        save_to_csv_realtime(temp_file_ip, r, mode=save_mode)
+                        header_written_ip = True
+                    # ----------------
                     
                     vt_counter += 1
                     if i < len(ip_list) - 1:
@@ -471,7 +503,7 @@ with tab2:
                         else:
                             time.sleep(15)
 
-                status_log.success("查詢完成！")
+                status_log.success(f"查詢完成！資料已存至 {temp_file_ip}")
                 if final_report:
                     df_vt = pd.DataFrame(final_report)
                     
