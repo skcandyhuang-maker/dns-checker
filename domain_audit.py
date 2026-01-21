@@ -31,11 +31,17 @@ def get_dns_resolver():
     return resolver
 
 def parse_input_raw(raw_text):
-    """萬能分詞與清洗"""
+    """
+    萬能分詞與清洗
+    支援分隔符號：換行(\n)、逗號(,)、分號(;)、空白(space)
+    並且修復黏在一起的網址
+    """
+    # 1. 先處理黏在一起的網址
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     processed_text = processed_text.replace('未找到', '\n未找到\n')
     
+    # 2. 核心切分
     tokens = re.split(r'[\s,;]+', processed_text)
     
     final_items = []
@@ -43,8 +49,10 @@ def parse_input_raw(raw_text):
         token = token.strip()
         if not token: continue 
         
+        # 移除常見雜訊
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
+        # 移除前後非英數字元 (保留中文與點)
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         
         if clean: 
@@ -53,7 +61,7 @@ def parse_input_raw(raw_text):
     return final_items
 
 # ==========================================
-#  核心功能模組
+#  核心功能模組 A: 域名檢測
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
@@ -168,7 +176,7 @@ def process_domain_audit(args):
         return (index, result)
 
     try:
-        # 1. DNS 解析 (基礎)
+        # 1. DNS
         if config['dns']:
             resolver = get_dns_resolver()
             try:
@@ -190,13 +198,12 @@ def process_domain_audit(args):
                 result["IPs"] = ", ".join(ip_list)
                 if len(ip_list) > 1: result["Multi-IP"] = f"✅ Yes ({len(ip_list)})"
                 
-                # 2. GeoIP 查詢 (獨立開關)
+                # 2. GeoIP (獨立開關)
                 if config['geoip']:
                     first_ip = ip_list[0]
                     if not first_ip.endswith('.'):
                         for attempt in range(3):
                             try:
-                                # 有開 GeoIP 才需要隨機延遲來防擋
                                 time.sleep(random.uniform(0.5, 1.5))
                                 resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", timeout=5).json()
                                 if resp.get("status") == "success":
@@ -206,15 +213,14 @@ def process_domain_audit(args):
                                     break
                             except: time.sleep(1)
                 
-                # 3. CDN 判別 (依賴 DNS CNAME 和 GeoIP ISP)
-                # 如果 GeoIP 沒開，ISP 會是 "-", 這樣 detect_providers 仍可依賴 CNAME 運作
+                # 3. CDN
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
                 result["CDN Provider"] = cdn
                 result["Cloud/Hosting"] = cloud
             else:
                 result["IPs"] = "No Record"
 
-        # 4. SSL
+        # 4. SSL (優先顯示組織)
         if config['ssl']:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -225,10 +231,15 @@ def process_domain_audit(args):
                 conn = ctx.wrap_socket(sock, server_hostname=domain)
                 result["Actual_Protocol"] = conn.version()
                 result["TLS 1.3"] = "✅ Yes" if conn.version() == 'TLSv1.3' else "❌ No"
+                
                 cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
-                subject = cert.get_issuer()
-                cn = subject.CN if subject.CN else "Unknown"
-                result["Issuer"] = cn
+                issuer_obj = cert.get_issuer()
+                
+                # 取得組織名稱 (O) 優先
+                org_name = issuer_obj.O
+                common_name = issuer_obj.CN
+                result["Issuer"] = org_name if org_name else (common_name if common_name else "Unknown")
+                
                 not_after = datetime.strptime(cert.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
                 result["SSL Days"] = (not_after - datetime.now()).days
             except: 
@@ -279,10 +290,12 @@ def check_single_domain_status(domain, target_ip):
         }
         
         try:
+            # 優先 HTTPS
             resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
             status_result["HTTP_Status"] = f"✅ {resp.status_code}"
         except:
             try:
+                # 候補 HTTP
                 resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
                 status_result["HTTP_Status"] = f"⚠️ {resp.status_code} (HTTP)"
             except:
@@ -324,26 +337,24 @@ with tab1:
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
-        # 修改：拆分 DNS 與 GeoIP
         check_dns = st.checkbox("DNS 解析 (基礎)", value=True, help="解析 A 紀錄與 CNAME，速度快")
         check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True, help="查詢 IP 的地理位置，需呼叫外部 API，速度較慢")
-        check_ssl = st.checkbox("SSL & TLS 憑證", value=True)
+        check_ssl = st.checkbox("SSL & TLS 憑證", value=True, help="顯示憑證組織、過期日與 TLS 1.3 支援")
         
         st.subheader("2. 連線測試")
-        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True)
-        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="速度慢，如非必要建議關閉")
+        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從目前主機發送請求，適合內網或本機測試")
+        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="透過 API 從國外節點測試，速度較慢")
         
         st.divider()
-        
         st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
         
-        # 新增：速度建議提示
+        # 舊有提示：速度建議
         st.info("💡 速度設定建議：")
         st.markdown("""
-        * **1-2 (龜速)**：適合 **1000+** 筆資料。雖然慢，但能保證 GeoIP 不會被封鎖 (429 Error)。
+        * **1-2 (龜速)**：適合 **1000+** 筆資料。保證 GeoIP 不會被封鎖。
         * **3 (平衡)**：適合 **100-500** 筆資料。
-        * **4-5 (極速)**：適合 **<100** 筆資料。若資料量大開這麼快，GeoIP 欄位可能會變成 `-` (被擋)。
+        * **4-5 (極速)**：適合 **<100** 筆資料。
         """)
 
     with col2:
@@ -355,7 +366,7 @@ with tab1:
             else:
                 config = {
                     'dns': check_dns, 
-                    'geoip': check_geoip, # 傳入新的設定
+                    'geoip': check_geoip, 
                     'ssl': check_ssl, 
                     'global_ping': check_global_ping, 
                     'simple_ping': check_simple_ping
@@ -384,8 +395,10 @@ with tab1:
                     if "✅" in str(row.get('Multi-IP', '')):
                         styles[3] = 'color: #009900;'
                     if "✅" in str(row.get('Simple Ping', '')):
-                        simple_idx = df.columns.get_loc("Simple Ping")
-                        styles[simple_idx] = 'color: #009900; font-weight: bold;'
+                        try:
+                            simple_idx = df.columns.get_loc("Simple Ping")
+                            styles[simple_idx] = 'color: #009900; font-weight: bold;'
+                        except: pass
                     return styles
                 
                 st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
@@ -395,7 +408,6 @@ with tab1:
 # --- 分頁 2: IP 反查 ---
 with tab2:
     st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
-    
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
     ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
     
