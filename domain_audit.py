@@ -18,14 +18,13 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具 (即時存檔版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (救援版)", layout="wide")
 
 # ==========================================
 #  共用輔助函式
 # ==========================================
 
 def get_dns_resolver():
-    """建立自訂的 DNS 解析器"""
     resolver = dns.resolver.Resolver()
     resolver.nameservers = ['8.8.8.8', '1.1.1.1'] 
     resolver.timeout = 5
@@ -33,7 +32,6 @@ def get_dns_resolver():
     return resolver
 
 def parse_input_raw(raw_text):
-    """萬能分詞與清洗"""
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     processed_text = processed_text.replace('未找到', '\n未找到\n')
@@ -49,22 +47,20 @@ def parse_input_raw(raw_text):
     return final_items
 
 def save_to_csv_realtime(filename, data_dict, mode='a'):
-    """即時寫入 CSV (Append 模式)"""
-    file_exists = os.path.isfile(filename)
-    fieldnames = list(data_dict.keys())
-    
-    # 確保目錄存在 (通常是當前目錄)
     try:
+        # 強制使用 utf-8-sig 以支援 Excel 中文
         with open(filename, mode, newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists or mode == 'w':
+            writer = csv.DictWriter(f, fieldnames=list(data_dict.keys()))
+            if mode == 'w':
                 writer.writeheader()
             writer.writerow(data_dict)
+        # 在終端機印出路徑，方便除錯
+        # print(f"Saved to: {os.path.abspath(filename)}") 
     except Exception as e:
         print(f"Write Error: {e}")
 
 # ==========================================
-#  核心功能模組 A: 域名檢測
+#  核心檢測邏輯 (保持不變)
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
@@ -119,7 +115,6 @@ def run_globalping_api(domain):
     url = "https://api.globalping.io/v1/measurements"
     headers = {'User-Agent': 'Mozilla/5.0', 'Content-Type': 'application/json'}
     payload = {"limit": 2, "locations": [], "target": domain, "type": "http", "measurementOptions": {"protocol": "HTTPS"}}
-    
     for attempt in range(3):
         try:
             time.sleep(random.uniform(2.0, 4.0) + attempt)
@@ -147,9 +142,7 @@ def run_globalping_api(domain):
 
 def run_simple_ping(domain):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     try:
         resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
@@ -169,7 +162,6 @@ def process_domain_audit(args):
         "TLS 1.3": "-", "Protocol": "-", "Issuer": "-", "SSL Days": "-", 
         "Global Ping": "-", "Simple Ping": "-"
     }
-
     if "未找到" in domain:
         result["IPs"] = "❌ Source Not Found"
         return (index, result)
@@ -184,7 +176,6 @@ def process_domain_audit(args):
                 cname_ans = resolver.resolve(domain, 'CNAME')
                 result["CNAME"] = str(cname_ans[0].target).rstrip('.')
             except: pass
-
             ip_list = []
             try:
                 a_ans = resolver.resolve(domain, 'A')
@@ -194,11 +185,9 @@ def process_domain_audit(args):
                     ais = socket.getaddrinfo(domain, 0, socket.AF_INET, socket.SOCK_STREAM)
                     ip_list = list(set([ai[4][0] for ai in ais]))
                 except: pass
-
             if ip_list:
                 result["IPs"] = ", ".join(ip_list)
                 if len(ip_list) > 1: result["Multi-IP"] = f"✅ Yes ({len(ip_list)})"
-                
                 if config['geoip']:
                     first_ip = ip_list[0]
                     if not first_ip.endswith('.'):
@@ -212,7 +201,6 @@ def process_domain_audit(args):
                                     result["ISP"] = resp.get("isp", "-")
                                     break
                             except: time.sleep(1)
-                
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
                 result["CDN Provider"] = cdn
                 result["Cloud/Hosting"] = cloud
@@ -229,13 +217,9 @@ def process_domain_audit(args):
                 conn = ctx.wrap_socket(sock, server_hostname=domain)
                 result["Actual_Protocol"] = conn.version()
                 result["TLS 1.3"] = "✅ Yes" if conn.version() == 'TLSv1.3' else "❌ No"
-                
                 cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
                 issuer_obj = cert.get_issuer()
-                org_name = issuer_obj.O
-                common_name = issuer_obj.CN
-                result["Issuer"] = org_name if org_name else (common_name if common_name else "Unknown")
-                
+                result["Issuer"] = issuer_obj.O if issuer_obj.O else (issuer_obj.CN if issuer_obj.CN else "Unknown")
                 not_after = datetime.strptime(cert.get_notAfter().decode('ascii'), '%Y%m%d%H%M%SZ')
                 result["SSL Days"] = (not_after - datetime.now()).days
             except: 
@@ -243,48 +227,28 @@ def process_domain_audit(args):
             finally:
                 if conn: conn.close()
 
-        if config['global_ping']:
-            result["Global Ping"] = run_globalping_api(domain)
-
-        if config['simple_ping']:
-            result["Simple Ping"] = run_simple_ping(domain)
+        if config['global_ping']: result["Global Ping"] = run_globalping_api(domain)
+        if config['simple_ping']: result["Simple Ping"] = run_simple_ping(domain)
 
     except Exception as e:
         result["IPs"] = str(e)
     
     return (index, result)
 
-# ==========================================
-#  功能模組 B: IP 反查 (VT)
-# ==========================================
-
 def check_single_domain_status(domain, target_ip):
     resolver = get_dns_resolver()
-    status_result = {
-        "Domain": domain,
-        "Current_Resolved_IP": "-", 
-        "IP_Match": "-",            
-        "HTTP_Status": "-"          
-    }
-    
+    status_result = {"Domain": domain, "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
     current_ips = []
     try:
         a_ans = resolver.resolve(domain, 'A')
         current_ips = [str(r.address) for r in a_ans]
         status_result["Current_Resolved_IP"] = ", ".join(current_ips)
-    except:
-        status_result["Current_Resolved_IP"] = "No DNS Record"
+    except: status_result["Current_Resolved_IP"] = "No DNS Record"
     
     if current_ips:
-        if target_ip in current_ips:
-            status_result["IP_Match"] = "✅ Yes"
-        else:
-            status_result["IP_Match"] = "❌ No"
-            
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        
+        if target_ip in current_ips: status_result["IP_Match"] = "✅ Yes"
+        else: status_result["IP_Match"] = "❌ No"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         try:
             resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
             status_result["HTTP_Status"] = f"✅ {resp.status_code}"
@@ -292,11 +256,8 @@ def check_single_domain_status(domain, target_ip):
             try:
                 resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
                 status_result["HTTP_Status"] = f"⚠️ {resp.status_code} (HTTP)"
-            except:
-                status_result["HTTP_Status"] = "❌ Unreachable"
-    else:
-        status_result["HTTP_Status"] = "❌ DNS Fail"
-        
+            except: status_result["HTTP_Status"] = "❌ Unreachable"
+    else: status_result["HTTP_Status"] = "❌ DNS Fail"
     return status_result
 
 def process_ip_vt_lookup(ip, api_key):
@@ -314,36 +275,51 @@ def process_ip_vt_lookup(ip, api_key):
         elif resp.status_code == 429: return "RateLimit", []
         elif resp.status_code == 401: return "AuthError", []
         else: return f"Error {resp.status_code}", []
-    except Exception as e:
-        return f"Exception: {str(e)}", []
+    except Exception as e: return f"Exception: {str(e)}", []
 
 
 # ==========================================
 #  UI 主程式
 # ==========================================
 
+# --- 側邊欄救援區 (新增功能) ---
+with st.sidebar:
+    st.header("⛑️ 斷線救援區")
+    st.caption("若掃描中斷，請在此下載上次的進度檔。")
+    
+    prog_domain = "domain_audit_progress.csv"
+    prog_ip = "ip_reverse_progress.csv"
+    
+    if os.path.exists(prog_domain):
+        with open(prog_domain, "rb") as f:
+            st.download_button("📂 下載未完成的域名報告", f, "rescued_domain_audit.csv", "text/csv")
+            st.caption(f"偵測到: {prog_domain}")
+    
+    if os.path.exists(prog_ip):
+        with open(prog_ip, "rb") as f:
+            st.download_button("📂 下載未完成的 IP 報告", f, "rescued_ip_report.csv", "text/csv")
+            st.caption(f"偵測到: {prog_ip}")
+
 tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("批量域名體檢 (支援即時存檔)")
-    st.caption("檔案將自動寫入本地目錄的 `domain_audit_progress.csv`，若中斷可直接查看該檔案。")
+    st.header("批量域名體檢")
     
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
-        check_dns = st.checkbox("DNS 解析 (基礎)", value=True, help="解析 A 紀錄與 CNAME，速度快")
-        check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True, help="查詢 IP 的地理位置，需呼叫外部 API，速度較慢")
-        check_ssl = st.checkbox("SSL & TLS 憑證", value=True, help="顯示憑證組織、過期日與 TLS 1.3 支援")
+        check_dns = st.checkbox("DNS 解析 (基礎)", value=True)
+        check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True)
+        check_ssl = st.checkbox("SSL & TLS 憑證", value=True)
         
         st.subheader("2. 連線測試")
-        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從目前主機發送請求，適合內網或本機測試")
-        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="透過 API 從國外節點測試，速度較慢")
+        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True)
+        check_global_ping = st.checkbox("Global Ping (全球)", value=True)
         
         st.divider()
         st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
-        st.info("💡 1000+筆資料建議設為 1-2 以防 API 封鎖。")
 
     with col2:
         raw_input = st.text_area("輸入域名 (支援混亂格式)", height=150, placeholder="example.com\nwww.google.com")
@@ -353,19 +329,13 @@ with tab1:
                 st.warning("請輸入域名")
             else:
                 config = {
-                    'dns': check_dns, 
-                    'geoip': check_geoip, 
-                    'ssl': check_ssl, 
-                    'global_ping': check_global_ping, 
-                    'simple_ping': check_simple_ping
+                    'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl, 
+                    'global_ping': check_global_ping, 'simple_ping': check_simple_ping
                 }
                 indexed_domains = list(enumerate(domain_list))
                 st.info(f"開始掃描 {len(domain_list)} 筆資料...")
                 
-                # 初始化即時存檔檔案
-                temp_file = "domain_audit_progress.csv"
-                if os.path.exists(temp_file):
-                    os.remove(temp_file) # 清除舊的暫存檔
+                if os.path.exists(prog_domain): os.remove(prog_domain)
                 
                 results = []
                 progress_bar = st.progress(0)
@@ -374,8 +344,6 @@ with tab1:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                     futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
                     completed = 0
-                    
-                    # 第一次寫入 Header 用
                     header_written = False
                     
                     for future in concurrent.futures.as_completed(futures):
@@ -383,29 +351,24 @@ with tab1:
                         row_data = data[1]
                         results.append(row_data)
                         
-                        # --- 即時存檔邏輯 ---
+                        # 即時存檔
                         save_mode = 'a' if header_written else 'w'
-                        save_to_csv_realtime(temp_file, row_data, mode=save_mode)
+                        save_to_csv_realtime(prog_domain, row_data, mode=save_mode)
                         header_written = True
-                        # ------------------
                         
                         completed += 1
                         progress_bar.progress(completed / len(domain_list))
-                        status_text.text(f"已掃描: {completed}/{len(domain_list)} - 自動存檔至 {temp_file}")
+                        status_text.text(f"已掃描: {completed}/{len(domain_list)} (已自動存檔)")
                 
-                status_text.success(f"掃描完成！資料已完整儲存至 {temp_file}")
+                status_text.success("掃描完成！")
                 df = pd.DataFrame(results)
                 
                 def highlight_rows(row):
                     styles = [''] * len(row)
-                    if "⚡" in str(row.get('CDN Provider', '')):
-                        styles[1] = 'color: #009900; font-weight: bold;'
-                    if "✅" in str(row.get('Multi-IP', '')):
-                        styles[3] = 'color: #009900;'
+                    if "⚡" in str(row.get('CDN Provider', '')): styles[1] = 'color: #009900; font-weight: bold;'
+                    if "✅" in str(row.get('Multi-IP', '')): styles[3] = 'color: #009900;'
                     if "✅" in str(row.get('Simple Ping', '')):
-                        try:
-                            simple_idx = df.columns.get_loc("Simple Ping")
-                            styles[simple_idx] = 'color: #009900; font-weight: bold;'
+                        try: styles[df.columns.get_loc("Simple Ping")] = 'color: #009900; font-weight: bold;'
                         except: pass
                     return styles
                 
@@ -415,8 +378,7 @@ with tab1:
 
 # --- 分頁 2: IP 反查 ---
 with tab2:
-    st.header("IP 反查與存活驗證 (支援即時存檔)")
-    st.caption("檔案將自動寫入本地目錄的 `ip_reverse_progress.csv`")
+    st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
     ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
     
@@ -431,12 +393,8 @@ with tab2:
             else:
                 st.toast(f"準備查詢 {len(ip_list)} 個 IP...")
                 
-                # 初始化即時存檔
-                temp_file_ip = "ip_reverse_progress.csv"
-                if os.path.exists(temp_file_ip):
-                    os.remove(temp_file_ip)
+                if os.path.exists(prog_ip): os.remove(prog_ip)
                 header_written_ip = False
-                
                 final_report = []
                 vt_counter = 0
                 status_log = st.empty()
@@ -446,16 +404,9 @@ with tab2:
                     status, domains = process_ip_vt_lookup(ip, api_key)
                     
                     rows_to_save = []
-                    
                     if status == "Success":
                         if not domains:
-                            row = {
-                                "Input_IP": ip, 
-                                "Domain": "(no data)", 
-                                "Current_Resolved_IP": "-", 
-                                "IP_Match": "-", 
-                                "HTTP_Status": "-"
-                            }
+                            row = {"Input_IP": ip, "Domain": "(no data)", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
                             final_report.append(row)
                             rows_to_save.append(row)
                         else:
@@ -472,7 +423,6 @@ with tab2:
                                     }
                                     final_report.append(row)
                                     rows_to_save.append(row)
-                                    
                     elif status == "RateLimit":
                         st.error("API 速率限制 (429)！")
                         break
@@ -480,19 +430,14 @@ with tab2:
                         st.error("API Key 錯誤 (401)！")
                         break
                     else:
-                        row = {
-                            "Input_IP": ip, "Domain": f"Error: {status}", 
-                            "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"
-                        }
+                        row = {"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
                         final_report.append(row)
                         rows_to_save.append(row)
                     
-                    # --- 寫入 CSV ---
                     for r in rows_to_save:
                         save_mode = 'a' if header_written_ip else 'w'
-                        save_to_csv_realtime(temp_file_ip, r, mode=save_mode)
+                        save_to_csv_realtime(prog_ip, r, mode=save_mode)
                         header_written_ip = True
-                    # ----------------
                     
                     vt_counter += 1
                     if i < len(ip_list) - 1:
@@ -503,27 +448,13 @@ with tab2:
                         else:
                             time.sleep(15)
 
-                status_log.success(f"查詢完成！資料已存至 {temp_file_ip}")
+                status_log.success(f"查詢完成！")
                 if final_report:
                     df_vt = pd.DataFrame(final_report)
-                    
                     def highlight_vt(row):
                         styles = [''] * len(row)
                         if "Yes" in str(row['IP_Match']) and "✅" in str(row['HTTP_Status']):
                             return ['background-color: #d4edda; color: #155724'] * len(row)
-                        elif "No" in str(row['IP_Match']):
-                            try:
-                                match_idx = df_vt.columns.get_loc("IP_Match")
-                                styles[match_idx] = 'color: #856404; font-weight: bold;'
-                            except: pass
                         return styles
-                        
-                    st.dataframe(
-                        df_vt.style.apply(highlight_vt, axis=1), 
-                        use_container_width=True,
-                        column_config={
-                            "Current_Resolved_IP": st.column_config.TextColumn("Current Resolved IP", width="medium"),
-                            "IP_Match": st.column_config.TextColumn("Match?", width="small"),
-                        }
-                    )
+                    st.dataframe(df_vt.style.apply(highlight_vt, axis=1), use_container_width=True)
                     st.download_button("下載反查報告", df_vt.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_check.csv")
