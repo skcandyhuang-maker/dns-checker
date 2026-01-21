@@ -18,7 +18,7 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具 (DB終極版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (v13修正版)", layout="wide")
 
 # ==========================================
 #  資料庫 (SQLite) 核心模組
@@ -300,8 +300,12 @@ def process_domain_audit(args):
             try:
                 sock = socket.create_connection((domain, 443), timeout=5)
                 conn = ctx.wrap_socket(sock, server_hostname=domain)
-                result["Actual_Protocol"] = conn.version()
+                
+                # --- 這裡修正了變數名稱 ---
+                result["Protocol"] = conn.version() # 修正：原本誤寫為 Actual_Protocol
                 result["TLS 1.3"] = "✅ Yes" if conn.version() == 'TLSv1.3' else "❌ No"
+                # -----------------------
+                
                 cert = crypto.load_certificate(crypto.FILETYPE_ASN1, conn.getpeercert(binary_form=True))
                 issuer_obj = cert.get_issuer()
                 result["Issuer"] = issuer_obj.O if issuer_obj.O else (issuer_obj.CN if issuer_obj.CN else "Unknown")
@@ -403,14 +407,12 @@ with tab1:
         st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
         
-        # --- 找回你的提示文字 ---
         st.info("💡 速度設定建議：")
         st.markdown("""
         * **1-2 (龜速)**：適合 **1000+** 筆資料。保證 GeoIP 不會被封鎖。
         * **3 (平衡)**：適合 **100-500** 筆資料。
         * **4-5 (極速)**：適合 **<100** 筆資料。
         """)
-        # ---------------------
 
     with col2:
         raw_input = st.text_area("輸入域名 (會自動跳過已掃描項目)", height=150, placeholder="example.com\nwww.google.com")
