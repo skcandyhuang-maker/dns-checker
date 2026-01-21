@@ -31,17 +31,11 @@ def get_dns_resolver():
     return resolver
 
 def parse_input_raw(raw_text):
-    """
-    萬能分詞與清洗
-    支援分隔符號：換行(\n)、逗號(,)、分號(;)、空白(space)
-    """
-    # 1. 先處理黏在一起的網址 (針對域名)
+    """萬能分詞與清洗"""
     processed_text = re.sub(r'(\.[a-z]{2,5})(www\.|http)', r'\1\n\2', raw_text, flags=re.IGNORECASE)
     processed_text = processed_text.replace('https://', '\nhttps://').replace('http://', '\nhttp://')
     processed_text = processed_text.replace('未找到', '\n未找到\n')
     
-    # 2. 核心切分邏輯：使用正則表達式同時切割 [換行, 逗號, 分號, 空白]
-    # r'[\s,;]+' 代表：只要遇到 空白(\s)、逗號(,) 或 分號(;) 的組合，都切開
     tokens = re.split(r'[\s,;]+', processed_text)
     
     final_items = []
@@ -49,16 +43,13 @@ def parse_input_raw(raw_text):
         token = token.strip()
         if not token: continue 
         
-        # 移除常見雜訊
         clean = token.replace('https://', '').replace('http://', '')
         clean = clean.split('/')[0].split('?')[0].split(':')[0]
-        # 移除前後非英數字元 (保留中文與點)
         clean = re.sub(r'^[^a-zA-Z0-9\u4e00-\u9fa5\.]+|[^a-zA-Z0-9\u4e00-\u9fa5]+$', '', clean)
         
         if clean: 
             final_items.append(clean)
             
-    # 去重 (Optionally) - 這裡保留原始輸入順序與重複項，若需去重可加 set
     return final_items
 
 # ==========================================
@@ -146,17 +137,16 @@ def run_globalping_api(domain):
 
 def run_simple_ping(domain):
     headers = {
-	"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7"
     }
-	
     try:
-        resp = requests.get(f"https://{domain}", timeout=5, headers=headers, verify=False)
+        resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
         return f"✅ {resp.status_code}"
     except:
         try:
-            resp = requests.get(f"http://{domain}", timeout=5, headers=headers)
+            resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
             return f"⚠️ {resp.status_code} (HTTP)"
         except:
             return "❌ Fail"
@@ -178,7 +168,7 @@ def process_domain_audit(args):
         return (index, result)
 
     try:
-        # DNS
+        # 1. DNS 解析 (基礎)
         if config['dns']:
             resolver = get_dns_resolver()
             try:
@@ -200,27 +190,31 @@ def process_domain_audit(args):
                 result["IPs"] = ", ".join(ip_list)
                 if len(ip_list) > 1: result["Multi-IP"] = f"✅ Yes ({len(ip_list)})"
                 
-                # GeoIP
-                first_ip = ip_list[0]
-                if not first_ip.endswith('.'):
-                    for attempt in range(3):
-                        try:
-                            time.sleep(random.uniform(0.5, 1.5))
-                            resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", timeout=5).json()
-                            if resp.get("status") == "success":
-                                result["Country"] = resp.get("country", "-")
-                                result["City"] = resp.get("city", "-")
-                                result["ISP"] = resp.get("isp", "-")
-                                break
-                        except: time.sleep(1)
+                # 2. GeoIP 查詢 (獨立開關)
+                if config['geoip']:
+                    first_ip = ip_list[0]
+                    if not first_ip.endswith('.'):
+                        for attempt in range(3):
+                            try:
+                                # 有開 GeoIP 才需要隨機延遲來防擋
+                                time.sleep(random.uniform(0.5, 1.5))
+                                resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", timeout=5).json()
+                                if resp.get("status") == "success":
+                                    result["Country"] = resp.get("country", "-")
+                                    result["City"] = resp.get("city", "-")
+                                    result["ISP"] = resp.get("isp", "-")
+                                    break
+                            except: time.sleep(1)
                 
+                # 3. CDN 判別 (依賴 DNS CNAME 和 GeoIP ISP)
+                # 如果 GeoIP 沒開，ISP 會是 "-", 這樣 detect_providers 仍可依賴 CNAME 運作
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
                 result["CDN Provider"] = cdn
                 result["Cloud/Hosting"] = cloud
             else:
                 result["IPs"] = "No Record"
 
-        # SSL
+        # 4. SSL
         if config['ssl']:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
@@ -261,32 +255,40 @@ def check_single_domain_status(domain, target_ip):
     resolver = get_dns_resolver()
     status_result = {
         "Domain": domain,
-        "Current_IP": "-",
-        "Match_Input_IP": "❌ No",
-        "HTTP_Status": "-"
+        "Current_Resolved_IP": "-", 
+        "IP_Match": "-",            
+        "HTTP_Status": "-"          
     }
     
+    current_ips = []
     try:
         a_ans = resolver.resolve(domain, 'A')
         current_ips = [str(r.address) for r in a_ans]
-        status_result["Current_IP"] = ", ".join(current_ips)
-        
-        if target_ip in current_ips:
-            status_result["Match_Input_IP"] = "✅ Yes"
-            headers = {"User-Agent": "Mozilla/5.0"}
-            try:
-                resp = requests.get(f"https://{domain}", timeout=5, headers=headers, verify=False)
-                status_result["HTTP_Status"] = f"✅ {resp.status_code} (HTTPS)"
-            except:
-                try:
-                    resp = requests.get(f"http://{domain}", timeout=5, headers=headers)
-                    status_result["HTTP_Status"] = f"✅ {resp.status_code} (HTTP)"
-                except:
-                    status_result["HTTP_Status"] = "❌ Unreachable"
-        else:
-             status_result["HTTP_Status"] = "-"
+        status_result["Current_Resolved_IP"] = ", ".join(current_ips)
     except:
-        status_result["Current_IP"] = "No Record"
+        status_result["Current_Resolved_IP"] = "No DNS Record"
+    
+    if current_ips:
+        if target_ip in current_ips:
+            status_result["IP_Match"] = "✅ Yes"
+        else:
+            status_result["IP_Match"] = "❌ No"
+            
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        try:
+            resp = requests.get(f"https://{domain}", timeout=10, headers=headers, verify=False)
+            status_result["HTTP_Status"] = f"✅ {resp.status_code}"
+        except:
+            try:
+                resp = requests.get(f"http://{domain}", timeout=10, headers=headers)
+                status_result["HTTP_Status"] = f"⚠️ {resp.status_code} (HTTP)"
+            except:
+                status_result["HTTP_Status"] = "❌ Unreachable"
+    else:
+        status_result["HTTP_Status"] = "❌ DNS Fail"
         
     return status_result
 
@@ -321,17 +323,28 @@ with tab1:
     
     col1, col2 = st.columns([1, 3])
     with col1:
-        st.subheader("設定")
-        check_dns = st.checkbox("DNS & GeoIP", value=True)
-        check_ssl = st.checkbox("SSL & TLS", value=True)
+        st.subheader("1. 檢測項目")
+        # 修改：拆分 DNS 與 GeoIP
+        check_dns = st.checkbox("DNS 解析 (基礎)", value=True, help="解析 A 紀錄與 CNAME，速度快")
+        check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True, help="查詢 IP 的地理位置，需呼叫外部 API，速度較慢")
+        check_ssl = st.checkbox("SSL & TLS 憑證", value=True)
+        
+        st.subheader("2. 連線測試")
+        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True)
+        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="速度慢，如非必要建議關閉")
         
         st.divider()
-        st.caption("連線測試")
-        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True, help="從你的電腦直接連線測試")
-        check_global_ping = st.checkbox("Global Ping (全球)", value=True, help="呼叫外部 API 從國外節點測試 (速度較慢)")
         
-        st.divider()
-        workers = st.slider("掃描速度", 1, 5, 3)
+        st.subheader("3. 掃描速度")
+        workers = st.slider("併發執行緒", 1, 5, 3)
+        
+        # 新增：速度建議提示
+        st.info("💡 速度設定建議：")
+        st.markdown("""
+        * **1-2 (龜速)**：適合 **1000+** 筆資料。雖然慢，但能保證 GeoIP 不會被封鎖 (429 Error)。
+        * **3 (平衡)**：適合 **100-500** 筆資料。
+        * **4-5 (極速)**：適合 **<100** 筆資料。若資料量大開這麼快，GeoIP 欄位可能會變成 `-` (被擋)。
+        """)
 
     with col2:
         raw_input = st.text_area("輸入域名 (支援混亂格式)", height=150, placeholder="example.com\nwww.google.com")
@@ -342,6 +355,7 @@ with tab1:
             else:
                 config = {
                     'dns': check_dns, 
+                    'geoip': check_geoip, # 傳入新的設定
                     'ssl': check_ssl, 
                     'global_ping': check_global_ping, 
                     'simple_ping': check_simple_ping
@@ -383,15 +397,12 @@ with tab2:
     st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
     
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
-    
-    # 修改提示文字，明確告知支援逗號分隔
     ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
     
     if st.button("🕵️ 開始反查 IP", type="primary"):
         if not api_key:
             st.error("請輸入 API Key！")
         else:
-            # 這裡會呼叫更新後的 parse_input_raw
             ip_list = parse_input_raw(ip_input)
             
             if not ip_list:
@@ -408,7 +419,13 @@ with tab2:
                     
                     if status == "Success":
                         if not domains:
-                            final_report.append({"Input_IP": ip, "Domain": "(no data)", "Match_IP": "-", "HTTP": "-"})
+                            final_report.append({
+                                "Input_IP": ip, 
+                                "Domain": "(no data)", 
+                                "Current_Resolved_IP": "-", 
+                                "IP_Match": "-", 
+                                "HTTP_Status": "-"
+                            })
                         else:
                             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                                 verify_futures = {executor.submit(check_single_domain_status, dom, ip): dom for dom in domains}
@@ -417,8 +434,9 @@ with tab2:
                                     final_report.append({
                                         "Input_IP": ip,
                                         "Domain": v_res["Domain"],
-                                        "Match_IP": v_res["Match_Input_IP"],
-                                        "HTTP": v_res["HTTP_Status"]
+                                        "Current_Resolved_IP": v_res["Current_Resolved_IP"], 
+                                        "IP_Match": v_res["IP_Match"],                       
+                                        "HTTP_Status": v_res["HTTP_Status"]                  
                                     })
                     elif status == "RateLimit":
                         st.error("API 速率限制 (429)！")
@@ -427,7 +445,10 @@ with tab2:
                         st.error("API Key 錯誤 (401)！")
                         break
                     else:
-                        final_report.append({"Input_IP": ip, "Domain": f"Error: {status}", "Match_IP": "-", "HTTP": "-"})
+                        final_report.append({
+                            "Input_IP": ip, "Domain": f"Error: {status}", 
+                            "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"
+                        })
                     
                     vt_counter += 1
                     if i < len(ip_list) - 1:
@@ -441,10 +462,24 @@ with tab2:
                 status_log.success("查詢完成！")
                 if final_report:
                     df_vt = pd.DataFrame(final_report)
+                    
                     def highlight_vt(row):
                         styles = [''] * len(row)
-                        if "Yes" in str(row['Match_IP']) and "200" in str(row['HTTP']):
+                        if "Yes" in str(row['IP_Match']) and "✅" in str(row['HTTP_Status']):
                             return ['background-color: #d4edda; color: #155724'] * len(row)
+                        elif "No" in str(row['IP_Match']):
+                            try:
+                                match_idx = df_vt.columns.get_loc("IP_Match")
+                                styles[match_idx] = 'color: #856404; font-weight: bold;'
+                            except: pass
                         return styles
-                    st.dataframe(df_vt.style.apply(highlight_vt, axis=1), use_container_width=True)
+                        
+                    st.dataframe(
+                        df_vt.style.apply(highlight_vt, axis=1), 
+                        use_container_width=True,
+                        column_config={
+                            "Current_Resolved_IP": st.column_config.TextColumn("Current Resolved IP", width="medium"),
+                            "IP_Match": st.column_config.TextColumn("Match?", width="small"),
+                        }
+                    )
                     st.download_button("下載反查報告", df_vt.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_check.csv")
