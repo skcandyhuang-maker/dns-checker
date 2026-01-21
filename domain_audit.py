@@ -9,7 +9,7 @@ import time
 import random
 import re
 import os
-import csv
+import sqlite3
 from datetime import datetime
 from OpenSSL import crypto
 import urllib3
@@ -18,10 +18,156 @@ import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 設定頁面標題
-st.set_page_config(page_title="Andy的全能網管工具 (救援版)", layout="wide")
+st.set_page_config(page_title="Andy的全能網管工具 (DB版)", layout="wide")
 
 # ==========================================
-#  共用輔助函式
+#  資料庫 (SQLite) 核心模組
+# ==========================================
+DB_FILE = "audit_data.db"
+
+def init_db():
+    """初始化資料庫，建立必要的 Tables"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    
+    # 建立域名檢測表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS domain_audit (
+            domain TEXT PRIMARY KEY,
+            cdn_provider TEXT,
+            cloud_hosting TEXT,
+            multi_ip TEXT,
+            cname TEXT,
+            ips TEXT,
+            country TEXT,
+            city TEXT,
+            isp TEXT,
+            tls_1_3 TEXT,
+            protocol TEXT,
+            issuer TEXT,
+            ssl_days TEXT,
+            global_ping TEXT,
+            simple_ping TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
+    # 建立 IP 反查表
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS ip_reverse (
+            input_ip TEXT,
+            domain TEXT,
+            current_resolved_ip TEXT,
+            ip_match TEXT,
+            http_status TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (input_ip, domain)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_existing_domains():
+    """取得已經掃描過的域名列表"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT domain FROM domain_audit")
+        rows = c.fetchall()
+        return set([r[0] for r in rows])
+    except:
+        return set()
+    finally:
+        conn.close()
+
+def save_domain_result(data):
+    """儲存單筆域名結果 (Thread-safe by creating new connection)"""
+    conn = sqlite3.connect(DB_FILE, timeout=30) # 增加 timeout 避免鎖定
+    c = conn.cursor()
+    try:
+        c.execute('''
+            INSERT OR REPLACE INTO domain_audit (
+                domain, cdn_provider, cloud_hosting, multi_ip, cname, ips, 
+                country, city, isp, tls_1_3, protocol, issuer, ssl_days, 
+                global_ping, simple_ping
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            data['Domain'], data['CDN Provider'], data['Cloud/Hosting'], data['Multi-IP'],
+            data['CNAME'], data['IPs'], data['Country'], data['City'], data['ISP'],
+            data['TLS 1.3'], data['Protocol'], data['Issuer'], str(data['SSL Days']),
+            data['Global Ping'], data['Simple Ping']
+        ))
+        conn.commit()
+    except Exception as e:
+        print(f"DB Error: {e}")
+    finally:
+        conn.close()
+
+def get_all_domain_results():
+    """讀取所有域名結果供下載"""
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        df = pd.read_sql_query("SELECT * FROM domain_audit", conn)
+        # 重新命名欄位以符合顯示習慣
+        df = df.rename(columns={
+            "domain": "Domain", "cdn_provider": "CDN Provider", "cloud_hosting": "Cloud/Hosting",
+            "multi_ip": "Multi-IP", "cname": "CNAME", "ips": "IPs",
+            "country": "Country", "city": "City", "isp": "ISP",
+            "tls_1_3": "TLS 1.3", "protocol": "Protocol", "issuer": "Issuer",
+            "ssl_days": "SSL Days", "global_ping": "Global Ping", "simple_ping": "Simple Ping"
+        })
+        # 移除 updated_at
+        if "updated_at" in df.columns:
+            df = df.drop(columns=["updated_at"])
+        return df
+    finally:
+        conn.close()
+
+# --- IP 反查 DB 函式 ---
+
+def save_ip_result(data):
+    conn = sqlite3.connect(DB_FILE, timeout=30)
+    c = conn.cursor()
+    try:
+        c.execute('''
+            INSERT OR REPLACE INTO ip_reverse (
+                input_ip, domain, current_resolved_ip, ip_match, http_status
+            ) VALUES (?, ?, ?, ?, ?)
+        ''', (
+            data['Input_IP'], data['Domain'], data['Current_Resolved_IP'], 
+            data['IP_Match'], data['HTTP_Status']
+        ))
+        conn.commit()
+    except Exception as e:
+        print(f"DB Error: {e}")
+    finally:
+        conn.close()
+
+def get_all_ip_results():
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        df = pd.read_sql_query("SELECT * FROM ip_reverse", conn)
+        df = df.rename(columns={
+            "input_ip": "Input_IP", "domain": "Domain", 
+            "current_resolved_ip": "Current_Resolved_IP", 
+            "ip_match": "IP_Match", "http_status": "HTTP_Status"
+        })
+        if "updated_at" in df.columns: df = df.drop(columns=["updated_at"])
+        return df
+    finally:
+        conn.close()
+
+def clear_database():
+    """清空資料庫"""
+    if os.path.exists(DB_FILE):
+        os.remove(DB_FILE)
+        init_db()
+
+# 初始化 DB
+init_db()
+
+# ==========================================
+#  共用輔助函式 (解析與清洗)
 # ==========================================
 
 def get_dns_resolver():
@@ -46,21 +192,8 @@ def parse_input_raw(raw_text):
         if clean: final_items.append(clean)
     return final_items
 
-def save_to_csv_realtime(filename, data_dict, mode='a'):
-    try:
-        # 強制使用 utf-8-sig 以支援 Excel 中文
-        with open(filename, mode, newline='', encoding='utf-8-sig') as f:
-            writer = csv.DictWriter(f, fieldnames=list(data_dict.keys()))
-            if mode == 'w':
-                writer.writeheader()
-            writer.writerow(data_dict)
-        # 在終端機印出路徑，方便除錯
-        # print(f"Saved to: {os.path.abspath(filename)}") 
-    except Exception as e:
-        print(f"Write Error: {e}")
-
 # ==========================================
-#  核心檢測邏輯 (保持不變)
+#  核心功能模組 A: 域名檢測
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
@@ -235,6 +368,10 @@ def process_domain_audit(args):
     
     return (index, result)
 
+# ==========================================
+#  功能模組 B: IP 反查 (VT)
+# ==========================================
+
 def check_single_domain_status(domain, target_ip):
     resolver = get_dns_resolver()
     status_result = {"Domain": domain, "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
@@ -282,120 +419,120 @@ def process_ip_vt_lookup(ip, api_key):
 #  UI 主程式
 # ==========================================
 
-# --- 側邊欄救援區 (新增功能) ---
 with st.sidebar:
-    st.header("⛑️ 斷線救援區")
-    st.caption("若掃描中斷，請在此下載上次的進度檔。")
+    st.header("🗄️ 資料庫管理")
+    st.caption("所有資料均存於本地 SQLite，關閉程式不會遺失。")
     
-    prog_domain = "domain_audit_progress.csv"
-    prog_ip = "ip_reverse_progress.csv"
+    # 資料庫重置按鈕
+    if st.button("🗑️ 清空資料庫 (重來)", type="secondary"):
+        clear_database()
+        st.toast("資料庫已清空！")
+        time.sleep(1)
+        st.rerun()
     
-    if os.path.exists(prog_domain):
-        with open(prog_domain, "rb") as f:
-            st.download_button("📂 下載未完成的域名報告", f, "rescued_domain_audit.csv", "text/csv")
-            st.caption(f"偵測到: {prog_domain}")
+    st.divider()
     
-    if os.path.exists(prog_ip):
-        with open(prog_ip, "rb") as f:
-            st.download_button("📂 下載未完成的 IP 報告", f, "rescued_ip_report.csv", "text/csv")
-            st.caption(f"偵測到: {prog_ip}")
+    st.subheader("📥 匯出資料")
+    # 匯出域名結果
+    df_domains = get_all_domain_results()
+    if not df_domains.empty:
+        st.download_button(
+            f"📄 下載域名報告 ({len(df_domains)}筆)", 
+            df_domains.to_csv(index=False).encode('utf-8-sig'), 
+            "domain_audit_db.csv", 
+            "text/csv"
+        )
+    else:
+        st.write("域名資料庫為空")
+        
+    # 匯出 IP 結果
+    df_ips = get_all_ip_results()
+    if not df_ips.empty:
+        st.download_button(
+            f"📄 下載 IP 反查報告 ({len(df_ips)}筆)", 
+            df_ips.to_csv(index=False).encode('utf-8-sig'), 
+            "ip_reverse_db.csv", 
+            "text/csv"
+        )
+    else:
+        st.write("IP 反查資料庫為空")
 
 tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("批量域名體檢")
+    st.header("批量域名體檢 (DB 自動存檔)")
     
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
-        check_dns = st.checkbox("DNS 解析 (基礎)", value=True)
-        check_geoip = st.checkbox("GeoIP 查詢 (國家/ISP)", value=True)
-        check_ssl = st.checkbox("SSL & TLS 憑證", value=True)
-        
-        st.subheader("2. 連線測試")
-        check_simple_ping = st.checkbox("Simple Ping (本機)", value=True)
-        check_global_ping = st.checkbox("Global Ping (全球)", value=True)
-        
+        check_dns = st.checkbox("DNS 解析", value=True)
+        check_geoip = st.checkbox("GeoIP 查詢", value=True)
+        check_ssl = st.checkbox("SSL & TLS", value=True)
+        check_simple_ping = st.checkbox("Simple Ping", value=True)
+        check_global_ping = st.checkbox("Global Ping", value=True)
         st.divider()
-        st.subheader("3. 掃描速度")
         workers = st.slider("併發執行緒", 1, 5, 3)
 
     with col2:
-        raw_input = st.text_area("輸入域名 (支援混亂格式)", height=150, placeholder="example.com\nwww.google.com")
+        raw_input = st.text_area("輸入域名 (會自動跳過已掃描項目)", height=150, placeholder="example.com\nwww.google.com")
         if st.button("🚀 開始掃描域名", type="primary"):
-            domain_list = parse_input_raw(raw_input)
+            full_list = parse_input_raw(raw_input)
+            
+            # --- 智慧過濾 ---
+            existing_domains = get_existing_domains()
+            domain_list = [d for d in full_list if d not in existing_domains]
+            skipped_count = len(full_list) - len(domain_list)
+            
             if not domain_list:
-                st.warning("請輸入域名")
+                if skipped_count > 0:
+                    st.success(f"🎉 所有 {skipped_count} 筆域名都已經在資料庫中了！請直接從側邊欄下載。")
+                else:
+                    st.warning("請輸入域名")
             else:
-                config = {
-                    'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl, 
-                    'global_ping': check_global_ping, 'simple_ping': check_simple_ping
-                }
+                if skipped_count > 0:
+                    st.info(f"⏩ 已自動跳過 {skipped_count} 筆重複資料，本次將掃描 {len(domain_list)} 筆。")
+                
+                config = {'dns': check_dns, 'geoip': check_geoip, 'ssl': check_ssl, 'global_ping': check_global_ping, 'simple_ping': check_simple_ping}
                 indexed_domains = list(enumerate(domain_list))
-                st.info(f"開始掃描 {len(domain_list)} 筆資料...")
                 
-                if os.path.exists(prog_domain): os.remove(prog_domain)
-                
-                results = []
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                     futures = {executor.submit(process_domain_audit, (idx, dom, config)): idx for idx, dom in indexed_domains}
                     completed = 0
-                    header_written = False
                     
                     for future in concurrent.futures.as_completed(futures):
                         data = future.result()
                         row_data = data[1]
-                        results.append(row_data)
                         
-                        # 即時存檔
-                        save_mode = 'a' if header_written else 'w'
-                        save_to_csv_realtime(prog_domain, row_data, mode=save_mode)
-                        header_written = True
+                        # 存入 SQLite
+                        save_domain_result(row_data)
                         
                         completed += 1
                         progress_bar.progress(completed / len(domain_list))
-                        status_text.text(f"已掃描: {completed}/{len(domain_list)} (已自動存檔)")
+                        status_text.text(f"已處理: {completed}/{len(domain_list)} (已存入 DB)")
                 
-                status_text.success("掃描完成！")
-                df = pd.DataFrame(results)
-                
-                def highlight_rows(row):
-                    styles = [''] * len(row)
-                    if "⚡" in str(row.get('CDN Provider', '')): styles[1] = 'color: #009900; font-weight: bold;'
-                    if "✅" in str(row.get('Multi-IP', '')): styles[3] = 'color: #009900;'
-                    if "✅" in str(row.get('Simple Ping', '')):
-                        try: styles[df.columns.get_loc("Simple Ping")] = 'color: #009900; font-weight: bold;'
-                        except: pass
-                    return styles
-                
-                st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
-                st.download_button("下載 CSV", df.to_csv(index=False).encode('utf-8-sig'), "domain_audit.csv")
+                status_text.success("掃描完成！所有資料已寫入資料庫，請從側邊欄下載。")
+                st.balloons()
+                time.sleep(1)
+                st.rerun() # 重新整理以更新側邊欄下載按鈕
 
 
 # --- 分頁 2: IP 反查 ---
 with tab2:
-    st.header("IP 反查與存活驗證 (Powered by VirusTotal)")
+    st.header("IP 反查與存活驗證 (DB 自動存檔)")
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
-    ip_input = st.text_area("輸入 IP 清單 (支援換行或逗號)", height=150, placeholder="223.26.10.19, 223.26.15.116\n8.8.8.8")
+    ip_input = st.text_area("輸入 IP 清單", height=150, placeholder="8.8.8.8")
     
     if st.button("🕵️ 開始反查 IP", type="primary"):
-        if not api_key:
-            st.error("請輸入 API Key！")
+        if not api_key: st.error("請輸入 API Key！")
         else:
             ip_list = parse_input_raw(ip_input)
-            
-            if not ip_list:
-                st.warning("請輸入 IP")
+            if not ip_list: st.warning("請輸入 IP")
             else:
                 st.toast(f"準備查詢 {len(ip_list)} 個 IP...")
-                
-                if os.path.exists(prog_ip): os.remove(prog_ip)
-                header_written_ip = False
-                final_report = []
                 vt_counter = 0
                 status_log = st.empty()
                 
@@ -403,41 +540,27 @@ with tab2:
                     status_log.markdown(f"**[{i+1}/{len(ip_list)}] 正在查詢 VT:** `{ip}` ...")
                     status, domains = process_ip_vt_lookup(ip, api_key)
                     
+                    # 準備結果列表 (可能有多個域名)
                     rows_to_save = []
+                    
                     if status == "Success":
                         if not domains:
-                            row = {"Input_IP": ip, "Domain": "(no data)", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
-                            final_report.append(row)
-                            rows_to_save.append(row)
+                            rows_to_save.append({"Input_IP": ip, "Domain": "(no data)", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
                         else:
                             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                                 verify_futures = {executor.submit(check_single_domain_status, dom, ip): dom for dom in domains}
                                 for future in concurrent.futures.as_completed(verify_futures):
                                     v_res = future.result()
-                                    row = {
-                                        "Input_IP": ip,
-                                        "Domain": v_res["Domain"],
-                                        "Current_Resolved_IP": v_res["Current_Resolved_IP"], 
-                                        "IP_Match": v_res["IP_Match"],                       
-                                        "HTTP_Status": v_res["HTTP_Status"]                  
-                                    }
-                                    final_report.append(row)
-                                    rows_to_save.append(row)
-                    elif status == "RateLimit":
-                        st.error("API 速率限制 (429)！")
-                        break
-                    elif status == "AuthError":
-                        st.error("API Key 錯誤 (401)！")
-                        break
+                                    rows_to_save.append({
+                                        "Input_IP": ip, "Domain": v_res["Domain"],
+                                        "Current_Resolved_IP": v_res["Current_Resolved_IP"], "IP_Match": v_res["IP_Match"], "HTTP_Status": v_res["HTTP_Status"]
+                                    })
                     else:
-                        row = {"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"}
-                        final_report.append(row)
-                        rows_to_save.append(row)
+                        rows_to_save.append({"Input_IP": ip, "Domain": f"Error: {status}", "Current_Resolved_IP": "-", "IP_Match": "-", "HTTP_Status": "-"})
                     
-                    for r in rows_to_save:
-                        save_mode = 'a' if header_written_ip else 'w'
-                        save_to_csv_realtime(prog_ip, r, mode=save_mode)
-                        header_written_ip = True
+                    # 寫入 DB
+                    for row in rows_to_save:
+                        save_ip_result(row)
                     
                     vt_counter += 1
                     if i < len(ip_list) - 1:
@@ -445,16 +568,9 @@ with tab2:
                             for sec in range(60, 0, -1):
                                 status_log.warning(f"⏳ Rate Limit 冷卻中... 剩餘 {sec} 秒")
                                 time.sleep(1)
-                        else:
-                            time.sleep(15)
+                        else: time.sleep(15)
 
-                status_log.success(f"查詢完成！")
-                if final_report:
-                    df_vt = pd.DataFrame(final_report)
-                    def highlight_vt(row):
-                        styles = [''] * len(row)
-                        if "Yes" in str(row['IP_Match']) and "✅" in str(row['HTTP_Status']):
-                            return ['background-color: #d4edda; color: #155724'] * len(row)
-                        return styles
-                    st.dataframe(df_vt.style.apply(highlight_vt, axis=1), use_container_width=True)
-                    st.download_button("下載反查報告", df_vt.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_check.csv")
+                status_log.success("查詢完成！資料已存入 DB。")
+                st.balloons()
+                time.sleep(1)
+                st.rerun()
