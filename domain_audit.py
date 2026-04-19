@@ -446,7 +446,7 @@ tab1, tab2 = st.tabs([" 域名檢測", " IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
-    st.header("批量域名體檢 (DB 自動存檔)")
+    st.header("Andy的批量域名體檢工具)")
     col1, col2 = st.columns([1, 3])
     with col1:
         st.subheader("1. 檢測項目")
