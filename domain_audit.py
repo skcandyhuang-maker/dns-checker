@@ -151,54 +151,96 @@ def parse_input_raw(raw_text):
     return final_items
 
 # ==========================================
-#  核心檢測邏輯
+#  核心檢測邏輯 
 # ==========================================
 
 def detect_providers(cname_record, isp_name):
     cname = cname_record.lower()
-    isp = isp_name.lower()
-    cdn_found = "-"
-    cloud_found = "-"
+    isp = isp_name.lower() 
+    cdns = []
+    clouds = []
     
+    # ==========================================
+    # 1. 所有的 CDN 特徵庫 
+    # ==========================================
     cdn_sigs = {
+        # --- 全球四大/公有雲原生 CDN ---
+        "AWS CloudFront": ["cloudfront"],
         "Cloudflare": ["cloudflare", "cdn.cloudflare.net"],
-        "AWS CloudFront": ["cloudfront.net"],
+        "Azure FrontDoor/CDN": ["azurefd", "azureedge", "msecnd", "trafficmanager"],
         "Akamai": ["akamai", "edgekey", "akamaiedge"],
-        "Azure CDN": ["azureedge", "msecnd"],
-        "Fastly": ["fastly"],
-        "Imperva": ["incapdns", "imperva"],
-        "Edgio": ["edgecast", "systemcdn"],
-        "CDNetworks": ["cdnetworks", "panthercdn"],
-        "Wangsu": ["wswebpic", "wscdns"],
-        "Tencent CDN": ["cdntip"],
-        "Alibaba CDN": ["kunlun", "alikunlun"],
-    }
-    for provider, keywords in cdn_sigs.items():
-        for kw in keywords:
-            if kw in cname:
-                cdn_found = f"⚡ {provider}"
-                break
-        if cdn_found != "-": break
         
-    if cdn_found == "-":
-        if "cloudflare" in isp: cdn_found = "⚡ Cloudflare"
-        elif "akamai" in isp: cdn_found = "⚡ Akamai"
-        elif "fastly" in isp: cdn_found = "⚡ Fastly"
+        # --- 知名獨立 CDN 與資安 WAF 廠商 ---
+        "Fastly": ["fastly", "fastly.net"],
+        "Imperva (Incapsula)": ["incapdns", "imperva"],
+        "Edgio (Edgecast/Limelight)": ["edgecast", "systemcdn", "llnwd", "limelight"], 
+        "StackPath (MaxCDN)": ["stackpath", "maxcdn"],
+        "Sucuri WAF": ["sucuri"],
+        "Gcore": ["gcdn.co", "gcore"],
+        "CDN77": ["cdn77"],
+        "HINET CDN": ["hinet"],
+        "HIWAF": ["hiwaf"],
+        "WIX": ["wixdns.net"],
+        
+        # --- 輕量級 / 開發者最愛 Edge CDN ---
+        "Bunny CDN": ["b-cdn.net", "bunny.net", "bunnycdn"],
+        "KeyCDN": ["kxcdn"],
+        "CacheFly": ["cachefly"],
+        "Vercel Edge": ["vercel", "vercel-dns"],
+        "Netlify Edge": ["netlify"],
+        
+        # --- 亞太區 / 中國大陸主力 CDN ---
+        "Alibaba CDN": ["kunlun", "alikunlun", "alibabacdn"],
+        "Tencent CDN": ["cdntip", "qcloud", "dnspod"],
+        "Wangsu (網宿/Quantil)": ["wswebpic", "wscdns", "quantil", "chinanetcenter"],
+        "CDNetworks": ["cdnetworks", "panthercdn"],
+        "Baidu Yunjiasu (百度雲加速)": ["yunjiasu", "baiduyuncdn"],
+        "Qiniu (七牛雲)": ["qiniudns", "clouddn", "qbox.me"],
+        "Upyun (又拍雲)": ["upaiyun"],
+        "ArvanCloud": ["arvancloud", "arvancdn"],
+    }
+    
+    for provider, keywords in cdn_sigs.items():
+        if any(kw in cname for kw in keywords) or any(kw in isp for kw in keywords):
+            if f"⚡ {provider}" not in cdns:
+                cdns.append(f"⚡ {provider}")
 
-    if cdn_found == "-":
-        cloud_sigs = {
-            "AWS": ["amazon", "amazonaws"],
-            "Google Cloud": ["google", "googleusercontent"],
-            "Azure": ["microsoft", "azure"],
-            "Alibaba": ["alibaba", "aliyun"],
-        }
-        for provider, keywords in cloud_sigs.items():
-            for kw in keywords:
-                if kw in cname or kw in isp:
-                    cloud_found = f"☁️ {provider}"
-                    break
-            if cloud_found != "-": break
-    return cdn_found, cloud_found
+    # ==========================================
+    # 2. 所有的雲端主機特徵庫
+    # ==========================================
+    cloud_sigs = {
+        "AWS": ["amazon", "amazonaws", "aws ec2"],
+        "Google Cloud": ["google", "googleusercontent", "gcp"],
+        "Azure": ["microsoft", "azure"],
+        "Alibaba Cloud": ["alibaba", "aliyun"],
+        "Tencent Cloud": ["tencent"],
+        "DigitalOcean": ["digitalocean"],
+        "Linode (Akamai)": ["linode"],
+        "Vultr": ["vultr", "choopa"],
+        "Hetzner": ["hetzner"],
+    }
+    
+    for provider, keywords in cloud_sigs.items():
+        # 【超強防呆機制】：防止 CDN 與母公司雲端主機重複顯示
+        if provider == "AWS" and any("CloudFront" in c for c in cdns):
+            continue
+        if provider == "Azure" and any("FrontDoor" in c for c in cdns):
+            continue
+        if provider == "Alibaba Cloud" and any("Alibaba CDN" in c for c in cdns):
+            continue
+        if provider == "Tencent Cloud" and any("Tencent CDN" in c for c in cdns):
+            continue
+            
+        # 如果不是上述 CDN，才檢查是否為一般雲端或 VPS 主機
+        if any(kw in cname for kw in keywords) or any(kw in isp for kw in keywords):
+            if f"☁️ {provider}" not in clouds:
+                clouds.append(f"☁️ {provider}")
+
+    # 格式化輸出
+    cdn_result = " + ".join(cdns) if cdns else "-"
+    cloud_result = " + ".join(clouds) if clouds else "-"
+
+    return cdn_result, cloud_result
 
 def run_globalping_api(domain):
     url = "https://api.globalping.io/v1/measurements"
@@ -280,11 +322,24 @@ def process_domain_audit(args):
                         for attempt in range(3):
                             try:
                                 time.sleep(random.uniform(0.5, 1.5))
-                                resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,status", timeout=5).json()
+                                # 💡 修正 1：在 URL 加上 org 欄位
+                                resp = requests.get(f"http://ip-api.com/json/{first_ip}?fields=country,city,isp,org,status", timeout=5).json()
+                                
                                 if resp.get("status") == "success":
                                     result["Country"] = resp.get("country", "-")
                                     result["City"] = resp.get("city", "-")
-                                    result["ISP"] = resp.get("isp", "-")
+                                    
+                                    # 💡 修正 2：將 isp 與 org 結合
+                                    isp_val = resp.get("isp", "")
+                                    org_val = resp.get("org", "")
+                                    
+                                    # 為了讓前端報表好看，我們把兩者組合成 "ISP名稱 (Org名稱)"
+                                    if isp_val and org_val and isp_val != org_val:
+                                        full_isp = f"{isp_val} ({org_val})"
+                                    else:
+                                        full_isp = org_val or isp_val or "-"
+                                        
+                                    result["ISP"] = full_isp
                                     break
                             except: time.sleep(1)
                 cdn, cloud = detect_providers(result["CNAME"], result["ISP"])
@@ -387,7 +442,7 @@ with st.sidebar:
         st.download_button(f"📄 下載 IP 反查報告 ({len(df_ips)}筆)", df_ips.to_csv(index=False).encode('utf-8-sig'), "ip_reverse_db.csv", "text/csv")
     else: st.write("IP 反查資料庫為空")
 
-tab1, tab2 = st.tabs(["🔍 域名檢測", "🕵️ IP 反查域名 (VT)"])
+tab1, tab2 = st.tabs([" 域名檢測", " IP 反查域名 (VT)"])
 
 # --- 分頁 1: 域名檢測 ---
 with tab1:
@@ -409,6 +464,7 @@ with tab1:
         
         st.info("💡 速度設定建議：")
         st.markdown("""
+        * **(注意！ 併發數超過1 ， 導出順序會是亂的! )
         * **1-2 (龜速)**：適合 **1000+** 筆資料。保證 GeoIP 不會被封鎖。
         * **3 (平衡)**：適合 **100-500** 筆資料。
         * **4-5 (極速)**：適合 **<100** 筆資料。
@@ -450,7 +506,7 @@ with tab2:
     st.header("IP 反查與存活驗證 (DB 自動存檔)")
     api_key = st.text_input("請輸入 VirusTotal API Key", type="password")
     ip_input = st.text_area("輸入 IP 清單", height=150, placeholder="8.8.8.8")
-    if st.button("🕵️ 開始反查 IP", type="primary"):
+    if st.button(" 開始反查 IP", type="primary"):
         if not api_key: st.error("請輸入 API Key！")
         else:
             ip_list = parse_input_raw(ip_input)
